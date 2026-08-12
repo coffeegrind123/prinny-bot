@@ -185,4 +185,11 @@ npm run check    # lint, typecheck, test
 
 ## Licence
 
-Apache-2.0.
+**Undecided — pick one before publishing.** The package is marked `private` and
+`UNLICENSED` so it cannot be published under a licence nobody chose.
+
+The Matrix internals here are ported from
+[openclaude](https://github.com/coffeegrind123/openclaude), which carries no
+`LICENSE` file and no `license` field in its `package.json`. Since that is the
+same author's repository the choice is yours to make, but it does need making:
+without it, nobody else can legally use this, and npm will refuse to publish.
