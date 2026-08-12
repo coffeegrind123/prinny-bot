@@ -91,6 +91,8 @@ quietly break it for everyone not running one specific client.
 | `answerCallbackQuery` | `ctx.answerCallbackQuery({ text, show_alert })` |
 | `editMessageText` / `editMessageReplyMarkup` | same names — standard Matrix `m.replace` edits underneath |
 | `sendChatAction('typing')` | `ctx.typing()`, or `ctx.withTyping(fn)` |
+| `sendPhoto` / `sendDocument` / `sendAudio` / `sendVideo` / `sendVoice` / `sendSticker` | same names on `bot.api`, or `ctx.replyWithPhoto(...)` and friends |
+| `getFile` + download | `ctx.download()`, `ctx.attachment` |
 | deep links (`t.me/bot?start=x`) | `buildDeepLink(userId, payload)` |
 
 Beyond Telegram: a `style` on inline buttons (`primary` / `danger`), an `args`
@@ -119,6 +121,49 @@ bot.catch(onError);                         // global
 
 `ctx.session` is a plain mutable object, per room by default, backed by memory
 or `FileSessionStorage`.
+
+## Attachments
+
+```ts
+await ctx.replyWithPhoto({ path: '/tmp/chart.png' }, { caption: 'Last week' });
+await ctx.replyWithDocument({ data: buffer, filename: 'report.pdf' });
+
+const file = await ctx.download();   // decrypted, whatever the room
+```
+
+Uploads are encrypted automatically in an encrypted room and downloads are
+decrypted on the way in, so no handler needs to know which kind of room it is
+in. The EncryptedFile crypto (AES-256-CTR, SHA-256 over the ciphertext,
+verified *before* decrypting) is implemented against the spec with
+`node:crypto` — no extra dependency.
+
+Two details that are easy to skip and visible when you do:
+
+- **Images carry `info.w`/`info.h`.** Clients use them to reserve layout space
+  before the bytes arrive; without them the timeline jumps when the image
+  loads. Dimensions are read straight out of the PNG/GIF/JPEG/WebP header, so
+  this costs no image library.
+- **Voice messages carry the MSC3245 marker and an MSC1767 waveform.** Without
+  the marker a client renders a generic audio attachment instead of a voice
+  bubble. Pass decoded PCM and `sendVoice` computes the duration and waveform;
+  `audioToPcm` will decode OGG/Opus for you if ffmpeg is on PATH.
+
+**Transcription is not included.** openclaude's voice pipeline installs a Python
+venv and downloads a faster-whisper model on first use, which has no business
+inside a chat library. `Transcriber` is the one-method interface to plug an
+engine into, and `transcribeAudio()` handles the decode and the failure
+reporting around it.
+
+## Progress reactions
+
+```ts
+await ctx.withReactions(() => runLongJob());   // ⏳ then ✅ or ❌
+```
+
+On the triggering message, so unlike a typing indicator it survives a restart
+and stays in scrollback. The `finally` is inside `withReactions`, because
+remembering to clear ⏳ at every throw site is how a spinner ends up stuck on
+someone's message permanently.
 
 ## Encryption, and the things that silently break without it
 
@@ -167,6 +212,10 @@ the homeserver who learns the bot's MXID before its owner does wins it.
 - [`examples/echo`](examples/echo) — the smallest useful bot
 - [`examples/keyboard-demo`](examples/keyboard-demo) — every button and keyboard
   type, including the ones meant to render disabled
+- [`examples/media`](examples/media) — sending and reading attachments, and
+  voice messages
+- [`examples/agent`](examples/agent) — long-running turns, progress reactions,
+  and a question asked as buttons
 
 ```bash
 MATRIX_HOMESERVER=https://matrix.example.org \
@@ -185,11 +234,7 @@ npm run check    # lint, typecheck, test
 
 ## Licence
 
-**Undecided — pick one before publishing.** The package is marked `private` and
-`UNLICENSED` so it cannot be published under a licence nobody chose.
+MIT. See [LICENSE](LICENSE).
 
-The Matrix internals here are ported from
-[openclaude](https://github.com/coffeegrind123/openclaude), which carries no
-`LICENSE` file and no `license` field in its `package.json`. Since that is the
-same author's repository the choice is yours to make, but it does need making:
-without it, nobody else can legally use this, and npm will refuse to publish.
+The Matrix internals are ported from
+[openclaude](https://github.com/coffeegrind123/openclaude) by the same author.

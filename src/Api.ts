@@ -7,13 +7,31 @@
  * as "the bot doesn't work for half my users", so it is not left to the caller.
  */
 
+import { readFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { EventTimeline, type MatrixClient } from 'matrix-js-sdk';
 import { BotContentKey, BotEventType, BotRelType } from './protocol/constants.js';
 import type { BotInfo, MenuButton, ReplyMarkup } from './protocol/types.js';
 import type { BotCommand } from './protocol/types.js';
-import { buildFallbackBodies } from './keyboard/fallback.js';
+import { buildFallbackBodies, renderFallbackListing } from './keyboard/fallback.js';
 import { formatForMatrix, stripHtml } from './matrix/format.js';
 import { buildThreadRelation } from './matrix/send.js';
+import {
+  buildMediaContent,
+  downloadAttachment,
+  imageDimensions,
+  isSupportedImageMime,
+  mimeFromFilename,
+  sanitizeFilename,
+  sniffMime,
+  uploadAttachment,
+  type AttachmentInput,
+  type DownloadOptions,
+  type DownloadedFile,
+  type MatrixMediaContent,
+  type MatrixMediaInfo,
+} from './matrix/media.js';
+import { buildVoiceContent, type VoiceMetadata } from './matrix/voice.js';
 
 /** Anything that can produce a `ReplyMarkup` — the wire form or a builder. */
 export type ReplyMarkupLike = ReplyMarkup | { toJSON(): ReplyMarkup };
@@ -40,6 +58,25 @@ export type MessageOptions = {
    * which is what stops two bots in a room from answering each other forever.
    */
   notice?: boolean;
+};
+
+/**
+ * A file to send: bytes in hand, or a path to read.
+ *
+ * Telegram accepts both, and so does this — `{ path }` is what a bot answering
+ * "send me the log" actually has.
+ */
+export type AttachmentSource =
+  | AttachmentInput
+  | { path: string; filename?: string; mimeType?: string };
+
+export type MediaOptions = Omit<MessageOptions, 'parse_mode' | 'notice'> & {
+  /** Shown with the attachment. Telegram's name. */
+  caption?: string;
+  /** Overrides the name taken from the source. */
+  filename?: string;
+  /** Merged into `info`. Duration, dimensions, anything else a client uses. */
+  info?: MatrixMediaInfo;
 };
 
 export type AnswerCallbackOptions = {
@@ -262,6 +299,188 @@ export class Api {
       content as never
     );
     return result.event_id ?? null;
+  }
+
+  // ── Attachments ────────────────────────────────────────────────────────────
+
+  /** Resolve a source to bytes, reading from disk when given a path. */
+  private static resolveSource(source: AttachmentSource): AttachmentInput {
+    if ('data' in source) return source;
+    const data = readFileSync(source.path);
+    const input: AttachmentInput = {
+      data,
+      filename: source.filename ?? basename(source.path),
+    };
+    if (source.mimeType) input.mimeType = source.mimeType;
+    return input;
+  }
+
+  /**
+   * Upload and send an attachment.
+   *
+   * The caption/filename split follows MSC2530: `filename` is always the real
+   * name, and `body` carries the caption when there is one. That separation is
+   * what lets a keyboard's fallback listing live in `body` without destroying
+   * the name a client shows on the download button.
+   */
+  private async sendAttachment(
+    roomId: string,
+    msgtype: 'm.image' | 'm.file' | 'm.audio' | 'm.video',
+    source: AttachmentSource,
+    options: MediaOptions
+  ): Promise<string | null> {
+    const input = Api.resolveSource(source);
+    const filename = sanitizeFilename(options.filename ?? input.filename);
+    const uploaded = await uploadAttachment(this.client, roomId, { ...input, filename });
+
+    const info: MatrixMediaInfo = { ...options.info };
+    // Clients reserve layout space from these before the bytes arrive; without
+    // them the timeline jumps when the image loads.
+    if (msgtype === 'm.image' && info.w === undefined && info.h === undefined) {
+      const dimensions = imageDimensions(input.data);
+      if (dimensions) {
+        info.w = dimensions.w;
+        info.h = dimensions.h;
+      }
+    }
+
+    const content = buildMediaContent(msgtype, filename, uploaded, info);
+    content.filename = filename;
+
+    const markup = resolveMarkup(options.reply_markup);
+    const caption = options.caption ?? '';
+    const listing = markup ? renderFallbackListing(markup) : null;
+
+    if (caption || listing) {
+      // `body` becomes the caption (plus any fallback listing); `filename`
+      // keeps the real name.
+      const bodies = buildFallbackBodies(caption, undefined, markup ?? undefined);
+      content.body = bodies.body || filename;
+      if (bodies[BotContentKey.PlainBody] !== undefined) {
+        content[BotContentKey.PlainBody] = bodies[BotContentKey.PlainBody];
+      }
+    }
+    if (markup) content[BotContentKey.ReplyMarkup] = markup;
+
+    const relation = buildThreadRelation(options.message_thread_id, options.reply_to_message_id);
+    if (relation) content['m.relates_to'] = relation;
+    else if (options.reply_to_message_id) {
+      content['m.relates_to'] = { 'm.in_reply_to': { event_id: options.reply_to_message_id } };
+    }
+
+    const result = await this.client.sendMessage(roomId, content as never);
+    return result.event_id ?? null;
+  }
+
+  /** Telegram's `sendPhoto`. */
+  async sendPhoto(
+    roomId: string,
+    photo: AttachmentSource,
+    options: MediaOptions = {}
+  ): Promise<string | null> {
+    const input = Api.resolveSource(photo);
+    const mime = input.mimeType ?? sniffMime(input.data) ?? mimeFromFilename(input.filename);
+    if (!isSupportedImageMime(mime)) {
+      // Sent as a file rather than silently as a broken image: a client that
+      // renders `m.image` for a PDF shows an empty box and no download button.
+      return this.sendDocument(roomId, photo, options);
+    }
+    return this.sendAttachment(roomId, 'm.image', photo, options);
+  }
+
+  /** Telegram's `sendDocument`. */
+  async sendDocument(
+    roomId: string,
+    document: AttachmentSource,
+    options: MediaOptions = {}
+  ): Promise<string | null> {
+    return this.sendAttachment(roomId, 'm.file', document, options);
+  }
+
+  /** Telegram's `sendAudio` — a music file, not a voice message. */
+  async sendAudio(
+    roomId: string,
+    audio: AttachmentSource,
+    options: MediaOptions = {}
+  ): Promise<string | null> {
+    return this.sendAttachment(roomId, 'm.audio', audio, options);
+  }
+
+  /** Telegram's `sendVideo`. */
+  async sendVideo(
+    roomId: string,
+    video: AttachmentSource,
+    options: MediaOptions = {}
+  ): Promise<string | null> {
+    return this.sendAttachment(roomId, 'm.video', video, options);
+  }
+
+  /**
+   * Telegram's `sendVoice` — a voice message, not an audio file.
+   *
+   * Carries the MSC3245 marker and an MSC1767 waveform, which is what makes a
+   * client draw a voice bubble instead of a generic audio attachment. Pass
+   * `voice: { pcm }` and the duration and waveform are computed for you.
+   */
+  async sendVoice(
+    roomId: string,
+    voice: AttachmentSource,
+    options: MediaOptions & { voice?: VoiceMetadata } = {}
+  ): Promise<string | null> {
+    const input = Api.resolveSource(voice);
+    const filename = sanitizeFilename(options.filename ?? input.filename);
+    const uploaded = await uploadAttachment(this.client, roomId, { ...input, filename });
+
+    const content = buildVoiceContent(options.caption || filename, uploaded, options.voice ?? {});
+
+    const markup = resolveMarkup(options.reply_markup);
+    if (markup) content[BotContentKey.ReplyMarkup] = markup;
+
+    const relation = buildThreadRelation(options.message_thread_id, options.reply_to_message_id);
+    if (relation) content['m.relates_to'] = relation;
+
+    const result = await this.client.sendMessage(roomId, content as never);
+    return result.event_id ?? null;
+  }
+
+  /** Telegram's `sendSticker`. An `m.sticker`, which is its own event type. */
+  async sendSticker(
+    roomId: string,
+    sticker: AttachmentSource,
+    options: MediaOptions = {}
+  ): Promise<string | null> {
+    const input = Api.resolveSource(sticker);
+    const filename = sanitizeFilename(options.filename ?? input.filename);
+    const uploaded = await uploadAttachment(this.client, roomId, { ...input, filename });
+
+    const info: MatrixMediaInfo = { ...options.info };
+    if (info.w === undefined && info.h === undefined) {
+      const dimensions = imageDimensions(input.data);
+      if (dimensions) {
+        info.w = dimensions.w;
+        info.h = dimensions.h;
+      }
+    }
+
+    const content = buildMediaContent('m.image', options.caption || filename, uploaded, info);
+    // m.sticker has no msgtype; it is the event type that carries the meaning.
+    delete content.msgtype;
+
+    const result = await this.client.sendEvent(roomId, 'm.sticker' as never, content as never);
+    return result.event_id ?? null;
+  }
+
+  /**
+   * Telegram's `getFile` plus the download it implies.
+   *
+   * Decrypts on the way out when the room was encrypted, so a caller never has
+   * to know whether it was.
+   */
+  async downloadAttachment(
+    content: MatrixMediaContent,
+    options: DownloadOptions = {}
+  ): Promise<DownloadedFile> {
+    return downloadAttachment(this.client, content, options);
   }
 
   async deleteMessage(roomId: string, eventId: string, reason?: string): Promise<void> {

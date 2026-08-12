@@ -2,6 +2,8 @@ export { Bot, type BotOptions } from './Bot.js';
 export {
   Api,
   type AnswerCallbackOptions,
+  type AttachmentSource,
+  type MediaOptions,
   type MessageOptions,
   type PendingCallback,
   type ReplyMarkupLike,
@@ -69,5 +71,66 @@ export {
   validateSize,
 } from './matrix/format.js';
 export { flushCryptoStore, initCryptoStore } from './matrix/cryptoStore.js';
+
+export {
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
+  buildMediaContent,
+  decodeBase64,
+  decryptEncryptedAttachment,
+  downloadAttachment,
+  encryptAttachment,
+  imageDimensions,
+  isAudioContent,
+  isFileContent,
+  isImageContent,
+  isMediaContent,
+  isSupportedImageMime,
+  isVideoContent,
+  mimeFromFilename,
+  roomIsEncrypted,
+  sanitizeFilename,
+  sniffMime,
+  uploadAttachment,
+  type AttachmentInput,
+  type DownloadOptions,
+  type DownloadedFile,
+  type MatrixEncryptedFile,
+  type MatrixMediaContent,
+  type MatrixMediaInfo,
+  type UploadedAttachment,
+} from './matrix/media.js';
+
+export {
+  AUDIO_INFO,
+  PCM_SAMPLE_RATE,
+  VOICE_MARKER,
+  WAVEFORM_BUCKETS,
+  WAVEFORM_MAX,
+  audioToPcm,
+  buildVoiceContent,
+  computeWaveform,
+  hasFfmpeg,
+  isVoiceMessage,
+  pcmDurationMs,
+  transcribeAudio,
+  voiceDuration,
+  type AudioBlock,
+  type TranscribeResult,
+  type Transcriber,
+  type VoiceMessageContent,
+  type VoiceMetadata,
+} from './matrix/voice.js';
+
+export {
+  REACTION_DONE,
+  REACTION_ERROR,
+  REACTION_WORKING,
+  TurnReactions,
+  addReaction,
+  removeReaction,
+  type ReactionHandle,
+  type TurnReactionsOptions,
+} from './matrix/reactions.js';
 
 export * from './protocol/index.js';

@@ -7,7 +7,22 @@
  */
 
 import type { MatrixClient, MatrixEvent, Room } from 'matrix-js-sdk';
-import type { Api, AnswerCallbackOptions, MessageOptions, PendingCallback } from './Api.js';
+import type {
+  Api,
+  AnswerCallbackOptions,
+  AttachmentSource,
+  MediaOptions,
+  MessageOptions,
+  PendingCallback,
+} from './Api.js';
+import {
+  isMediaContent,
+  type DownloadOptions,
+  type DownloadedFile,
+  type MatrixMediaContent,
+} from './matrix/media.js';
+import { isVoiceMessage, type VoiceMetadata } from './matrix/voice.js';
+import { TurnReactions, type TurnReactionsOptions } from './matrix/reactions.js';
 import { BotContentKey } from './protocol/constants.js';
 import type { ReplyMarkup } from './protocol/types.js';
 import { sanitizeReplyMarkup } from './protocol/validate.js';
@@ -258,9 +273,99 @@ export class Context<S = unknown> {
     return this.api.react(this.roomId, messageId ?? this.messageId, key);
   }
 
+  // ── Attachments ────────────────────────────────────────────────────────────
+
+  /**
+   * The attachment on the triggering message, if it has one.
+   *
+   * Includes stickers and every media msgtype; `null` for ordinary text.
+   */
+  get attachment(): MatrixMediaContent | null {
+    const content = this.event.getContent() as MatrixMediaContent;
+    if (this.event.getType() === 'm.sticker' && (content.url || content.file)) return content;
+    return isMediaContent(content) ? content : null;
+  }
+
+  /** Whether the triggering message is a voice message rather than an audio file. */
+  get isVoiceMessage(): boolean {
+    return isVoiceMessage(this.event.getContent());
+  }
+
+  /**
+   * Download the attachment on the triggering message.
+   *
+   * Decrypts when the room is encrypted. Throws when there is nothing to
+   * download — check `ctx.attachment` first, or use a `message:image` filter.
+   */
+  async download(options: DownloadOptions = {}): Promise<DownloadedFile> {
+    const attachment = this.attachment;
+    if (!attachment) throw new Error('This message has no attachment to download.');
+    return this.api.downloadAttachment(attachment, options);
+  }
+
+  private mediaDefaults(options: MediaOptions): MediaOptions {
+    const merged: MediaOptions = { ...options };
+    if (merged.message_thread_id === undefined && this.threadRootId) {
+      merged.message_thread_id = this.threadRootId;
+    }
+    return merged;
+  }
+
+  /** Telegram's `sendPhoto`, into this room. */
+  async replyWithPhoto(photo: AttachmentSource, options: MediaOptions = {}) {
+    return this.api.sendPhoto(this.roomId, photo, this.mediaDefaults(options));
+  }
+
+  /** Telegram's `sendDocument`, into this room. */
+  async replyWithDocument(document: AttachmentSource, options: MediaOptions = {}) {
+    return this.api.sendDocument(this.roomId, document, this.mediaDefaults(options));
+  }
+
+  /** Telegram's `sendAudio`, into this room. */
+  async replyWithAudio(audio: AttachmentSource, options: MediaOptions = {}) {
+    return this.api.sendAudio(this.roomId, audio, this.mediaDefaults(options));
+  }
+
+  /** Telegram's `sendVideo`, into this room. */
+  async replyWithVideo(video: AttachmentSource, options: MediaOptions = {}) {
+    return this.api.sendVideo(this.roomId, video, this.mediaDefaults(options));
+  }
+
+  /** Telegram's `sendVoice`, into this room. */
+  async replyWithVoice(
+    voice: AttachmentSource,
+    options: MediaOptions & { voice?: VoiceMetadata } = {}
+  ) {
+    return this.api.sendVoice(this.roomId, voice, this.mediaDefaults(options));
+  }
+
+  /** Telegram's `sendSticker`, into this room. */
+  async replyWithSticker(sticker: AttachmentSource, options: MediaOptions = {}) {
+    return this.api.sendSticker(this.roomId, sticker, this.mediaDefaults(options));
+  }
+
+  // ── Progress ───────────────────────────────────────────────────────────────
+
   /** Telegram's `sendChatAction('typing')`. */
   async typing(active = true, timeoutMs = 20_000): Promise<void> {
     await this.api.sendTyping(this.roomId, active, timeoutMs);
+  }
+
+  /**
+   * Progress reactions on the triggering message: ⏳ while `work` runs, then
+   * ✅ or ❌.
+   *
+   * Unlike a typing indicator this survives a restart and stays in scrollback,
+   * which is what you want for a turn measured in minutes rather than seconds.
+   */
+  async withReactions<T>(work: () => Promise<T>, options: TurnReactionsOptions = {}): Promise<T> {
+    const reactions = new TurnReactions(
+      this.client,
+      this.roomId,
+      this.messageId || undefined,
+      options
+    );
+    return reactions.around(work);
   }
 
   /**

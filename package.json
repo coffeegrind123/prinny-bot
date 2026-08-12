@@ -3,8 +3,7 @@
   "version": "0.1.0",
   "description": "Telegram-style bot framework for Matrix — slash command menus, inline keyboards, callback queries and reply keyboards, with plain-text fallback for clients that don't support them",
   "type": "module",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/coffeegrind123/prinny-bot.git"
@@ -38,7 +37,8 @@
   "files": [
     "dist",
     "spec",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
