@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Crypto store and session state. These hold the bot's Olm identity and its
+# room keys — never commit them, and never share one between two running bots.
+.prinny-bot/
+*.keystore
+.env
+.env.*
+!.env.example
