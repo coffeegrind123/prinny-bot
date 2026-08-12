@@ -11,6 +11,8 @@
 import {
   DEEP_LINK_ORIGIN,
   DEEP_LINK_PATH_PREFIX,
+  DEEP_LINK_SCHEME,
+  DEEP_LINK_SCHEME_HOST,
   Limits,
 } from './protocol/constants.js';
 import { isValidDeepLinkPayload } from './protocol/validate.js';
@@ -47,6 +49,23 @@ export const buildDeepLink = (userId: string, payload?: string): string => {
 };
 
 /**
+ * The custom-scheme form of the same link.
+ *
+ * Share the https one; use this where the target is known to be an installed
+ * client, since an https link opened outside the app goes to the browser.
+ */
+export const buildDeepLinkScheme = (userId: string, payload?: string): string => {
+  const https = new URL(buildDeepLink(userId, payload));
+  const url = new URL(
+    `${DEEP_LINK_SCHEME}//${DEEP_LINK_SCHEME_HOST}${https.pathname.slice(
+      DEEP_LINK_PATH_PREFIX.length - 1
+    )}`
+  );
+  url.search = https.search;
+  return url.toString();
+};
+
+/**
  * Parse a deep link, or return null.
  *
  * Rejects an out-of-spec payload instead of passing it through, because the
@@ -61,11 +80,26 @@ export const parseDeepLink = (link: string): DeepLink | null => {
     return null;
   }
 
-  if (!url.pathname.startsWith(DEEP_LINK_PATH_PREFIX)) return null;
+  let encodedUserId: string;
+  if (url.protocol === DEEP_LINK_SCHEME) {
+    // A custom scheme has no meaningful `origin` — it parses as "null" — so
+    // the host is checked directly instead.
+    if (url.host !== DEEP_LINK_SCHEME_HOST) return null;
+    encodedUserId = url.pathname.replace(/^\//, '');
+  } else {
+    if (url.origin !== DEEP_LINK_ORIGIN) return null;
+    if (!url.pathname.startsWith(DEEP_LINK_PATH_PREFIX)) return null;
+    encodedUserId = url.pathname.slice(DEEP_LINK_PATH_PREFIX.length);
+  }
 
   // Exactly one decode: the MXID was percent-encoded on the way in, and
   // decoding twice would let `%2540` smuggle an `@` past this check.
-  const userId = decodeURIComponent(url.pathname.slice(DEEP_LINK_PATH_PREFIX.length));
+  let userId: string;
+  try {
+    userId = decodeURIComponent(encodedUserId);
+  } catch {
+    return null;
+  }
   if (!MXID_PATTERN.test(userId)) return null;
 
   const payload = url.searchParams.get('start');

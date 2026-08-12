@@ -160,7 +160,7 @@ export const buttonAction = (button: InlineKeyboardButton): ButtonAction => {
     present.push(
       isAllowedButtonUrl(button.url)
         ? { kind: 'url', url: button.url }
-        : { kind: 'disabled', reason: 'invalid_url' }
+        : { kind: 'disabled', reason: 'invalid_url' },
     );
   }
   if (isRecord(button.copy_text) && typeof button.copy_text.text === 'string') {
@@ -280,7 +280,7 @@ export const sanitizeReplyMarkup = (raw: unknown): ReplyMarkup | null => {
     put(
       markup,
       'input_field_placeholder',
-      cleanString(raw.input_field_placeholder, Limits.PLACEHOLDER_MAX_LENGTH)
+      cleanString(raw.input_field_placeholder, Limits.PLACEHOLDER_MAX_LENGTH),
     );
     put(markup, 'selective', cleanBool(raw.selective));
     return markup;
@@ -296,7 +296,7 @@ export const sanitizeReplyMarkup = (raw: unknown): ReplyMarkup | null => {
   put(
     markup,
     'input_field_placeholder',
-    cleanString(raw.input_field_placeholder, Limits.PLACEHOLDER_MAX_LENGTH)
+    cleanString(raw.input_field_placeholder, Limits.PLACEHOLDER_MAX_LENGTH),
   );
   put(markup, 'selective', cleanBool(raw.selective));
   return markup;
@@ -358,7 +358,7 @@ export const sanitizeBotInfo = (raw: unknown): BotInfo | null => {
   put(
     info,
     'short_description',
-    cleanString(raw.short_description, Limits.SHORT_DESCRIPTION_MAX_LENGTH)
+    cleanString(raw.short_description, Limits.SHORT_DESCRIPTION_MAX_LENGTH),
   );
   put(info, 'description', cleanString(raw.description, Limits.BOT_DESCRIPTION_MAX_LENGTH));
   put(info, 'menu_button', sanitizeMenuButton(raw.menu_button));
@@ -384,7 +384,7 @@ export const sanitizeBotInfo = (raw: unknown): BotInfo | null => {
 
 /** Sanitise an incoming `app.prinny.bot.callback_answer`, or `null`. */
 export const sanitizeCallbackAnswer = (
-  raw: unknown
+  raw: unknown,
 ): Omit<CallbackAnswerContent, 'm.relates_to'> | null => {
   if (!isRecord(raw)) return null;
   const id = cleanString(raw.id, 128);

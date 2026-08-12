@@ -371,11 +371,19 @@ reason other than a direct user action.
 
 ## 6. Deep links
 
-Telegram's `https://t.me/bot?start=payload`:
+Telegram's `https://t.me/bot?start=payload`. Two equivalent forms:
 
 ```
 https://prinny.app/bot/{mxid}?start={payload}
+prinny://bot/{mxid}?start={payload}
 ```
+
+The https form is the shareable one — it is what a user clicks inside a client
+or on the web, and it degrades to a normal web page for anyone without a client
+installed. The custom scheme exists because an https link opened from *outside*
+an app goes to the browser: reaching an installed desktop or mobile client
+needs a registered scheme, which is considerably less work than the hosted-file
+setup that Android App Links and Apple universal links require.
 
 Opening one joins or creates a DM with `{mxid}` and sends `/start {payload}` as
 an ordinary message. `{payload}` is limited to 64 characters of

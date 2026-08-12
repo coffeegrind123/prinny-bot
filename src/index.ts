@@ -55,6 +55,7 @@ export {
 } from './session.js';
 export {
   buildDeepLink,
+  buildDeepLinkScheme,
   deepLinkStartMessage,
   parseDeepLink,
   type DeepLink,

@@ -79,6 +79,18 @@ export const ALLOWED_URL_SCHEMES = ['https:', 'http:', 'matrix:'] as const;
 /** How long a client waits for a `callback_answer` before clearing the spinner. */
 export const CALLBACK_ANSWER_TIMEOUT_MS = 15_000;
 
-/** Deep link origin. `https://prinny.app/bot/{mxid}?start={payload}` */
+/**
+ * Deep links. Two forms, both valid:
+ *
+ *   https://prinny.app/bot/{mxid}?start={payload}
+ *   prinny://bot/{mxid}?start={payload}
+ *
+ * The https form is the shareable one. The custom scheme exists because an
+ * https link opened outside the app goes to the browser — reaching an
+ * installed client needs a registered scheme, and that is far less work than
+ * the hosted-file setup Android App Links and Apple universal links require.
+ */
 export const DEEP_LINK_ORIGIN = 'https://prinny.app';
 export const DEEP_LINK_PATH_PREFIX = '/bot/';
+export const DEEP_LINK_SCHEME = 'prinny:';
+export const DEEP_LINK_SCHEME_HOST = 'bot';

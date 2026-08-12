@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { CommandRegistry, isCommandForBot, parseCommand } from '../src/commands.js';
-import { buildDeepLink, deepLinkStartMessage, parseDeepLink } from '../src/deeplink.js';
+import {
+  buildDeepLink,
+  buildDeepLinkScheme,
+  deepLinkStartMessage,
+  parseDeepLink,
+} from '../src/deeplink.js';
 
 describe('parseCommand', () => {
   it('splits the name from its arguments', () => {
@@ -159,6 +164,23 @@ describe('deep links', () => {
 
   it('decodes exactly once, so double encoding cannot smuggle an MXID', () => {
     expect(parseDeepLink('https://prinny.app/bot/%2540a%253Ab.org')).toBeNull();
+  });
+
+  it('round-trips the custom-scheme form too', () => {
+    // The https form goes to the browser when opened from outside an app;
+    // this one reaches an installed client.
+    const link = buildDeepLinkScheme('@helper:example.org', 'invite_abc');
+    expect(link).toBe('prinny://bot/%40helper%3Aexample.org?start=invite_abc');
+    expect(parseDeepLink(link)).toEqual({ userId: '@helper:example.org', payload: 'invite_abc' });
+  });
+
+  it('accepts an unencoded MXID in the custom-scheme form', () => {
+    // Hand-written links in the wild will not be percent-encoded.
+    expect(parseDeepLink('prinny://bot/@a:b.org')).toEqual({ userId: '@a:b.org' });
+  });
+
+  it('rejects a custom-scheme link with the wrong host', () => {
+    expect(parseDeepLink('prinny://room/@a:b.org')).toBeNull();
   });
 
   it('builds the message the client sends', () => {
