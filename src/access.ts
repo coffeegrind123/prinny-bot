@@ -18,6 +18,15 @@ export type AccessState = {
 };
 
 export type AccessOptions = {
+  /**
+   * Let every sender through, so the application decides who may talk.
+   *
+   * `evaluate()` still reports ownership, but never refuses. Use this only
+   * when something upstream is doing the gating — a bot that answers everyone
+   * on a public homeserver is a bot anyone can drive. `Bot` selects it with
+   * `access: false`.
+   */
+  allowAll?: boolean;
   /** Explicit owner. Set this and bootstrap never runs. */
   ownerUserId?: string;
   allowedUserIds?: string[];
@@ -43,11 +52,14 @@ export class AccessControl {
 
   private readonly allowBootstrap: boolean;
 
+  private readonly allowAll: boolean;
+
   constructor(options: AccessOptions = {}) {
     this.allowed = new Set(options.allowedUserIds ?? []);
     this.owner = options.ownerUserId;
     this.persist = options.persist;
     this.allowBootstrap = options.allowBootstrap ?? false;
+    this.allowAll = options.allowAll ?? false;
     if (this.owner !== undefined) this.allowed.add(this.owner);
   }
 
@@ -61,6 +73,12 @@ export class AccessControl {
   }
 
   evaluate(userId: string): AccessDecision {
+    // Checked before `isUnclaimed` so an allow-all bot with no owner does not
+    // refuse everyone, which is the whole point of the mode.
+    if (this.allowAll) {
+      return { allowed: true, isOwner: this.isOwner(userId), bootstrapped: false };
+    }
+
     if (this.isUnclaimed) {
       if (!this.allowBootstrap) {
         return {

@@ -195,17 +195,25 @@ export function chunkMatrixText(text: string, limit: number = MAX_CHUNK): string
 
 /**
  * End-to-end: markdown → Matrix HTML chunks, each with plain text body.
+ *
+ * `limit` is a chunk ceiling, not a target — pass a smaller one when the
+ * receiving side is stricter than Matrix is, as bridges to other protocols
+ * tend to be.
  */
-export function formatForMatrix(text: string): Array<{
+export function formatForMatrix(
+  text: string,
+  limit: number = MAX_CHUNK
+): Array<{
   html: string
   body: string
 }> {
+  const cap = Math.max(1, Math.min(limit, MAX_CHUNK))
   const html = markdownToMatrixHtml(text)
   const body = stripHtml(html)
-  if (html.length <= MAX_CHUNK) return [{ html, body }]
+  if (html.length <= cap) return [{ html, body }]
 
   // For long messages, chunk the HTML and derive body per chunk
-  const htmlChunks = chunkMatrixText(html)
+  const htmlChunks = chunkMatrixText(html, cap)
   return htmlChunks.map(h => ({ html: h, body: stripHtml(h) }))
 }
 

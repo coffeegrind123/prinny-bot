@@ -81,12 +81,32 @@ export type BotOptions<S> = {
    */
   matchFallbackReplies?: boolean;
 
-  access?: AccessOptions;
+  /**
+   * Pass `false` to let every sender through, because the application gates
+   * instead — a channel bridge with its own allowlist, for example. Without
+   * that, the built-in control refuses unknown senders *and says so*, which a
+   * bridge doing silent drops does not want.
+   */
+  access?: AccessOptions | false;
   /** Pass `false` to disable. Default 10 messages per 5 minutes, owner exempt. */
   rateLimit?: RateLimitOptions | false;
   session?: SessionOptions<S>;
 
   initialSyncLimit?: number;
+  /**
+   * Also deliver messages sent at or after this timestamp, even though they
+   * predate this run.
+   *
+   * By default a bot ignores everything older than its own startup, so a
+   * restart never re-answers a conversation it already handled. That is the
+   * right default and the wrong one for a bridge, which must pick up whatever
+   * arrived while it was down. Pass the watermark of the last message you
+   * actually delivered.
+   *
+   * Bounded by `initialSyncLimit`: the catch-up can only see what the initial
+   * sync returns per room, so raise that alongside this for longer outages.
+   */
+  catchUpFrom?: number;
   /** Called after a password login mints new credentials worth storing. */
   onCredentials?: (credentials: { accessToken: string; deviceId?: string }) => void;
   logger?: (message: string) => void;
@@ -133,7 +153,9 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
     super();
     this.options = options;
     this.log = options.logger ?? ((message) => process.stderr.write(`[prinny-bot] ${message}\n`));
-    this.access = new AccessControl(options.access);
+    this.access = new AccessControl(
+      options.access === false ? { allowAll: true } : options.access
+    );
     this.rateLimiter =
       options.rateLimit === false ? null : new RateLimiter(options.rateLimit ?? {});
     this.sessions = new SessionManager<S>(
@@ -199,7 +221,14 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
     return this.registry.toBotInfo();
   }
 
-  private async publishTo(roomId: string): Promise<void> {
+  /**
+   * Advertise the command list into one room.
+   *
+   * Public because a bot that turns `autoJoin` off and joins on its own terms
+   * still has to publish after each join, and republishing everywhere for one
+   * new room is the wrong shape.
+   */
+  async publishTo(roomId: string): Promise<void> {
     const result = await this.api.publishBotInfo(roomId, this.botInfo());
     if (result === 'timeline') {
       this.log(
@@ -211,9 +240,21 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
     }
   }
 
+  /**
+   * Advertise into every joined room, one at a time.
+   *
+   * Sequential rather than `Promise.all`: firing a send per room at once is
+   * exactly the shape a homeserver rate-limits, and a bot in four rooms had
+   * three of its four publishes rejected with `M_LIMIT_EXCEEDED`. The retry in
+   * `publishBotInfo` recovers from a burst, but not creating the burst is
+   * cheaper — this runs once at startup and once per join, so the latency
+   * costs nothing.
+   */
   private async publishToAllRooms(): Promise<void> {
     const rooms = this.client.getRooms().filter((room) => room.getMyMembership() === 'join');
-    await Promise.all(rooms.map((room) => this.publishTo(room.roomId).catch(() => undefined)));
+    for (const room of rooms) {
+      await this.publishTo(room.roomId).catch(() => undefined);
+    }
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -453,8 +494,15 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
     if (!room || !live) return;
     if (event.getSender() === this.options.userId) return;
 
+    // Normally nothing older than startup is delivered, so a restart does not
+    // re-answer old conversations. `catchUpFrom` lowers that floor for a
+    // caller that tracks what it has already handled.
+    const floor =
+      this.options.catchUpFrom !== undefined
+        ? Math.min(this.options.catchUpFrom, this.startupTs)
+        : this.startupTs;
     const ts = event.getTs();
-    if (typeof ts === 'number' && ts < this.startupTs) return;
+    if (typeof ts === 'number' && ts < floor) return;
 
     if (event.isEncrypted()) {
       try {

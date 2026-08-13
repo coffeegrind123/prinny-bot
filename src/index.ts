@@ -134,3 +134,28 @@ export {
 } from './matrix/reactions.js';
 
 export * from './protocol/index.js';
+
+/**
+ * The pieces of matrix-js-sdk a consumer needs to work with `bot.matrixClient`.
+ *
+ * Re-exported rather than left to the caller's own dependency because
+ * matrix-js-sdk **throws on being loaded twice** ("Multiple matrix-js-sdk
+ * entrypoints detected!"). An application that installs its own copy alongside
+ * this one crashes at import, and the error names neither package. Importing
+ * these from here guarantees a single instance.
+ */
+export {
+  ClientEvent,
+  EventTimeline,
+  MatrixEventEvent,
+  RoomEvent,
+  RoomMemberEvent,
+  RoomStateEvent,
+} from 'matrix-js-sdk';
+export type {
+  IContent,
+  MatrixClient,
+  MatrixEvent,
+  Room,
+  RoomMember,
+} from 'matrix-js-sdk';

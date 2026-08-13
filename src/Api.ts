@@ -14,7 +14,7 @@ import { BotContentKey, BotEventType, BotRelType } from './protocol/constants.js
 import type { BotInfo, MenuButton, ReplyMarkup } from './protocol/types.js';
 import type { BotCommand } from './protocol/types.js';
 import { buildFallbackBodies, renderFallbackListing } from './keyboard/fallback.js';
-import { formatForMatrix, stripHtml } from './matrix/format.js';
+import { chunkMatrixText, formatForMatrix, stripHtml } from './matrix/format.js';
 import { buildThreadRelation } from './matrix/send.js';
 import {
   buildMediaContent,
@@ -32,6 +32,32 @@ import {
   type MatrixMediaInfo,
 } from './matrix/media.js';
 import { buildVoiceContent, type VoiceMetadata } from './matrix/voice.js';
+
+/**
+ * Retry a send that the homeserver rate-limited.
+ *
+ * Synapse answers `M_LIMIT_EXCEEDED` with a `retry_after_ms` it expects to be
+ * honoured, and matrix-js-sdk surfaces that straight to the caller for state
+ * and custom events. Without this, a bot advertising its commands across a
+ * handful of rooms has most of them rejected — visible only as a log line, and
+ * the command menu is then simply missing for those rooms.
+ *
+ * Only 429 is retried. Anything else, `M_FORBIDDEN` above all, is a real
+ * answer and retrying it just delays the fallback.
+ */
+const withRateLimitRetry = async <T>(send: () => Promise<T>, attempts = 3): Promise<T> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await send();
+    } catch (error) {
+      const err = error as { errcode?: string; data?: { retry_after_ms?: number } };
+      if (err?.errcode !== 'M_LIMIT_EXCEEDED' || attempt >= attempts) throw error;
+      // Trust the server's number, with a floor so a missing value cannot spin.
+      const waitMs = Math.min(Math.max(err.data?.retry_after_ms ?? 1000, 250), 10_000);
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
+};
 
 /** Anything that can produce a `ReplyMarkup` — the wire form or a builder. */
 export type ReplyMarkupLike = ReplyMarkup | { toJSON(): ReplyMarkup };
@@ -58,6 +84,11 @@ export type MessageOptions = {
    * which is what stops two bots in a room from answering each other forever.
    */
   notice?: boolean;
+  /**
+   * Chunk ceiling in characters. Capped at the Matrix event limit either way;
+   * lower it when whatever reads the room is stricter than Matrix is.
+   */
+  chunk_limit?: number;
 };
 
 /**
@@ -109,10 +140,16 @@ export class Api {
    * split at boundaries the renderer chose — splitting rendered HTML at an
    * arbitrary offset produces unbalanced tags.
    */
-  private render(text: string, parseMode: NonNullable<MessageOptions['parse_mode']>) {
+  private render(
+    text: string,
+    parseMode: NonNullable<MessageOptions['parse_mode']>,
+    chunkLimit?: number
+  ) {
     if (parseMode === 'HTML') return [{ body: stripHtml(text), html: text }];
-    if (parseMode === 'None') return [{ body: text, html: undefined }];
-    return formatForMatrix(text).map((chunk) => ({
+    if (parseMode === 'None') {
+      return chunkMatrixText(text, chunkLimit).map((piece) => ({ body: piece, html: undefined }));
+    }
+    return formatForMatrix(text, chunkLimit).map((chunk) => ({
       body: chunk.body,
       // Markdown that rendered to nothing but its own plain text is not worth
       // a formatted_body: it doubles the event for no visible difference.
@@ -163,7 +200,7 @@ export class Api {
    * text is not split here — use `sendMessage` for that.
    */
   buildContent(text: string, options: MessageOptions = {}): Record<string, unknown> {
-    const parts = this.render(text, options.parse_mode ?? 'Markdown');
+    const parts = this.render(text, options.parse_mode ?? 'Markdown', options.chunk_limit);
     const first = parts[0] ?? { body: text, html: undefined };
     return this.assemble(first.body, first.html, options);
   }
@@ -176,7 +213,7 @@ export class Api {
    * per chunk would mean one press per copy.
    */
   async sendMessage(roomId: string, text: string, options: MessageOptions = {}): Promise<string[]> {
-    const parts = this.render(text, options.parse_mode ?? 'Markdown');
+    const parts = this.render(text, options.parse_mode ?? 'Markdown', options.chunk_limit);
 
     const eventIds: string[] = [];
     for (let i = 0; i < parts.length; i += 1) {
@@ -517,11 +554,8 @@ export class Api {
     if (!userId) return 'failed';
 
     try {
-      await this.client.sendStateEvent(
-        roomId,
-        BotEventType.Info as never,
-        info as never,
-        userId
+      await withRateLimitRetry(() =>
+        this.client.sendStateEvent(roomId, BotEventType.Info as never, info as never, userId)
       );
       return 'state';
     } catch {
@@ -529,7 +563,9 @@ export class Api {
     }
 
     try {
-      await this.client.sendEvent(roomId, BotEventType.Info as never, info as never);
+      await withRateLimitRetry(() =>
+        this.client.sendEvent(roomId, BotEventType.Info as never, info as never)
+      );
       return 'timeline';
     } catch {
       return 'failed';
