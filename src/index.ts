@@ -136,6 +136,16 @@ export {
 export * from './protocol/index.js';
 
 /**
+ * The Discord-compatible webhook server is NOT re-exported here.
+ *
+ * It defines Discord's own `ButtonStyle`, `ComponentType` and friends, and
+ * those collide by name with the protocol's - which is unavoidable, since both
+ * sets have to keep their own vendor's names to be recognisable. Importing from
+ * `@prinny/bot/webhook` keeps the two vocabularies apart instead of forcing one
+ * of them to be renamed.
+ */
+
+/**
  * The pieces of matrix-js-sdk a consumer needs to work with `bot.matrixClient`.
  *
  * Re-exported rather than left to the caller's own dependency because

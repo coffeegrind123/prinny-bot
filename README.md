@@ -207,6 +207,124 @@ new Bot({
 off by default, unlike openclaude's version: it is a real race, and anyone on
 the homeserver who learns the bot's MXID before its owner does wins it.
 
+## Discord-compatible webhooks
+
+`@prinny/bot/webhook` serves Discord's Webhook API, at Discord's paths, with
+Discord's request and response bodies — backed by Matrix. Anything already
+posting to `https://discord.com/api/webhooks/{id}/{token}` works against it by
+changing the host and nothing else.
+
+```ts
+import { Bot } from '@prinny/bot';
+import { FileWebhookStore, WebhookServer } from '@prinny/bot/webhook';
+
+const bot = new Bot({ /* … */ });
+await bot.start();
+
+const webhooks = new WebhookServer({
+  client: bot.matrixClient,
+  store: new FileWebhookStore('./webhooks.json'),
+  authTokens: [process.env.WEBHOOK_ADMIN_TOKEN!],
+  publicUrl: 'https://prinny.example',
+});
+
+// A Matrix room can be addressed directly — no registration step.
+const channel = webhooks.registerChannel('!room:example.org', { name: 'ci' });
+await webhooks.listen(8080);
+```
+
+Then, from anywhere:
+
+```bash
+curl -X POST "https://prinny.example/api/webhooks/$ID/$TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"username":"CI","content":"Build **passed** on `main`"}'
+```
+
+### What is implemented
+
+| Endpoint | Notes |
+|---|---|
+| `POST /channels/{channel}/webhooks` | `channel` may be a channel id or a Matrix room id |
+| `GET /channels/{channel}/webhooks` | |
+| `GET /guilds/{guild}/webhooks` | guild = Matrix space |
+| `GET`/`PATCH`/`DELETE` `/webhooks/{id}` | bot-token authenticated |
+| `GET`/`PATCH`/`DELETE` `/webhooks/{id}/{token}` | token authenticated, no user returned |
+| `POST /webhooks/{id}/{token}` | Execute — `wait`, `thread_id`, `with_components` |
+| `POST /webhooks/{id}/{token}/slack` | Slack incoming-webhook payloads |
+| `POST /webhooks/{id}/{token}/github` | 18 GitHub events, rendered as embeds |
+| `GET`/`PATCH`/`DELETE` `/webhooks/{id}/{token}/messages/{id}` | edit is an `m.replace` |
+
+`content`, `embeds`, `components`, `poll`, `files[n]` + `payload_json`,
+`attachments`, `allowed_mentions`, `flags`, `username`, `avatar_url`,
+`thread_name` and `applied_tags` are all read. The `/api` and `/v10` path
+prefixes are optional, as on Discord.
+
+### How Discord concepts land on Matrix
+
+| Discord | Matrix |
+|---|---|
+| guild | space |
+| channel | room |
+| message | event |
+| embed | `<blockquote>` with a `<font color>` accent |
+| components (buttons) | `app.prinny.bot.reply_markup` inline keyboard |
+| select menu | one button per option, same callback |
+| poll | MSC3381 `m.poll.start` |
+| `username` / `avatar_url` | `in.prinny.webhook`, rendered by the Prinny client |
+| `thread_id` / `thread_name` | `m.thread` relation |
+| `@everyone` | `@room`, only when `allowed_mentions` permits it |
+
+Ids handed out are real snowflakes, minted and mapped in the store — a Matrix
+room id is not a snowflake, and clients that sort or timestamp ids would break
+on one.
+
+### Deliberate differences
+
+These are the only places the two APIs do not agree, and each is a decision
+rather than a gap:
+
+- **No `allowed_mentions` means no mentions.** Discord's default is to parse
+  everything in the content; Matrix pushes on `m.mentions`, so that default
+  would notify every user a webhook happened to name. Send `allowed_mentions`
+  explicitly — which is Discord's own guidance anyway.
+- **`tts` is ignored.** Matrix has no text-to-speech flag.
+- **Embed images are linked, not embedded.** An embed image is an arbitrary
+  remote URL; rendering it would leak every reader's IP address to whoever holds
+  the webhook token. The same rule applies to `avatar_url`, where only `mxc://`
+  is honoured.
+- **Management endpoints need a bot token from `authTokens`.** There is no
+  Discord permission model here, so holding one of those tokens *is*
+  MANAGE_WEBHOOKS. With none configured, every management route is closed — an
+  unauthenticated Create Webhook would let anyone post into any room the bot is
+  in.
+
+### Webhook events (the outgoing direction)
+
+The same module signs, sends, verifies and acknowledges Discord's webhook
+events — Ed25519, the `PING` handshake, and the documented retry policy.
+
+```ts
+import {
+  deliverWebhookEvent,
+  handleWebhookEventRequest,
+} from '@prinny/bot/webhook';
+
+// Receiving: verify FIRST, parse second. Discord probes endpoints with
+// deliberately invalid signatures and removes any URL that accepts one.
+const result = handleWebhookEventRequest({
+  publicKey,
+  signature: req.headers['x-signature-ed25519'],
+  timestamp: req.headers['x-signature-timestamp'],
+  body: rawBody,
+});
+res.writeHead(result.status).end();
+
+// Sending: retries 5xx and network failures with doubling backoff for ten
+// minutes, and gives up on a 4xx immediately — that will not become a 2xx.
+await deliverWebhookEvent(payload, { url, privateKey });
+```
+
 ## Examples
 
 - [`examples/echo`](examples/echo) — the smallest useful bot
@@ -216,6 +334,8 @@ the homeserver who learns the bot's MXID before its owner does wins it.
   voice messages
 - [`examples/agent`](examples/agent) — long-running turns, progress reactions,
   and a question asked as buttons
+- [`examples/webhook`](examples/webhook) — a Discord-compatible webhook server
+  in front of a Matrix room
 
 ```bash
 MATRIX_HOMESERVER=https://matrix.example.org \
