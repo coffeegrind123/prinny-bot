@@ -330,8 +330,20 @@ export function renderEmbed(embed: DiscordEmbed, ctx: RenderContext = {}): Disco
   }
 
   const body = lines.join('<br/>');
+  // The accent colour tints a leading rule glyph, NOT the body.
+  //
+  // It used to wrap the whole embed in `<font color>`, which made the colour
+  // the text colour of every character — title, fields and any code block
+  // included. On Discord the colour is a stripe down the left edge and never
+  // touches the text, so an embed that is perfectly legible there arrived here
+  // as, say, #1b2838 body text on a dark theme: invisible. A dark accent is a
+  // normal choice; illegible text is not an acceptable rendering of it.
+  //
+  // U+258C LEFT HALF BLOCK is the closest thing to that stripe that survives
+  // Matrix's allowed-tag list, and colouring one glyph cannot hurt legibility
+  // however dark the accent is.
   const html = color
-    ? `<blockquote><font color="${color}">${body}</font></blockquote>`
+    ? `<blockquote><font color="${color}">\u258c</font> ${body}</blockquote>`
     : `<blockquote>${body}</blockquote>`;
 
   return { html, text: plain.join('\n') };
