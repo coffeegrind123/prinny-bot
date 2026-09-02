@@ -5,6 +5,10 @@
     // runtime comes from `fake-indexeddb`; TypeScript only ships the
     // declarations as part of DOM.
     "lib": ["ES2023", "DOM"],
+    // TypeScript 6 stopped auto-including every `@types/*` package it can
+    // find; without this, `Buffer` and the `node:*` modules resolve to nothing
+    // and every test file fails with TS2591.
+    "types": ["node"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "outDir": "dist",

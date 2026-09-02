@@ -1,0 +1,28 @@
+# Docs: <https://docs.github.com/en/code-security/supply-chain-security/keeping-your-dependencies-updated-automatically/customizing-dependency-updates>
+#
+# Added 2026-09-02. Until then **nothing watched this repo's dependencies** —
+# prinny-client and prinny had a Dependabot config, this one did not, and the
+# gap was not theoretical: the audit that prompted this file found vitest
+# pinned at 2.1.9, carrying a critical (CVSS 9.8) arbitrary-file-read-and-
+# execute advisory plus a high in vite, and eslint on a 9.x line where every
+# published version is deprecated. Neither would have aged a day if this file
+# had existed.
+#
+# There are no workflows in this repo yet, so no `github-actions` ecosystem is
+# declared. Add one in the same change as the first workflow.
+#
+# Note that this file governs *version* updates only. Dependabot *security*
+# updates are a repository setting — switch alerts and automated security
+# fixes on for this repo too, as was done for prinny and prinny-client on
+# 2026-08-11.
+
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: "tuesday"
+      time: "01:00"
+      timezone: "Europe/Helsinki"
+    open-pull-requests-limit: 10
