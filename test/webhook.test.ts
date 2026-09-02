@@ -129,6 +129,30 @@ describe('discord text', () => {
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
   });
+
+  it('keeps a link whose scheme a client may open', () => {
+    expect(renderDiscordText('[docs](https://example.org/x)').html).toContain(
+      '<a href="https://example.org/x">'
+    );
+    expect(renderDiscordText('[mail](mailto:a@b.example)').html).toContain(
+      '<a href="mailto:a@b.example">'
+    );
+  });
+
+  it('will not emit an href a client would have to strip', () => {
+    for (const raw of [
+      '[click](javascript:alert(1))',
+      '[click](JaVaScRiPt:alert(1))',
+      '[click](data:text/html,<script>alert(1)</script>)',
+      '[click](vbscript:msgbox(1))',
+      '[click](file:///etc/passwd)',
+    ]) {
+      const { html } = renderDiscordText(raw);
+      expect(html).not.toContain('<a href');
+      // The words the author wrote survive; only the anchor is dropped.
+      expect(html).toContain('click');
+    }
+  });
 });
 
 describe('embeds', () => {
@@ -174,6 +198,28 @@ describe('components', () => {
       callback_data: 'stop',
     });
     expect(markup?.inline_keyboard[0]?.[1]?.url).toBe('https://ci');
+  });
+
+  it('drops a link button url a client must not open', () => {
+    const { markup } = renderComponents([
+      {
+        type: ComponentType.ActionRow,
+        components: [
+          {
+            type: ComponentType.Button,
+            style: ButtonStyle.Link,
+            label: 'Logs',
+            url: 'javascript:alert(1)',
+          },
+        ],
+      },
+    ]);
+    const button = markup?.inline_keyboard[0]?.[0];
+    // The button survives so the sender's layout does not reflow, but it
+    // carries no action and renders greyed out.
+    expect(button?.text).toBe('Logs');
+    expect(button?.url).toBeUndefined();
+    expect(button?.callback_data).toBeUndefined();
   });
 
   it('turns select options into buttons carrying the same callback', () => {

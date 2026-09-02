@@ -76,6 +76,22 @@ export const Limits = {
 /** URL schemes a client may open from a button. Everything else renders disabled. */
 export const ALLOWED_URL_SCHEMES = ['https:', 'http:', 'matrix:'] as const;
 
+/**
+ * URL schemes this library will put in an `<a href>` inside message HTML.
+ *
+ * Wider than the button set by exactly `mailto:`, which is ubiquitous in prose
+ * and where composing a message is not a privileged action — and narrower than
+ * the Matrix spec's suggested list, which still names `ftp:` and `magnet:`.
+ * Both of those are handed to a local application by a desktop client's URL
+ * opener, on a link authored by whoever sent the message.
+ *
+ * The receiving client sanitises `formatted_body` too, and under the spec that
+ * is where the guarantee lives. This is the sending half of the same rule: a
+ * library that relays untrusted webhook content into Matrix should not be the
+ * thing emitting `javascript:` and trusting someone else to strip it.
+ */
+export const ALLOWED_LINK_SCHEMES = ['https:', 'http:', 'mailto:', 'matrix:'] as const;
+
 /** How long a client waits for a `callback_answer` before clearing the spinner. */
 export const CALLBACK_ANSWER_TIMEOUT_MS = 15_000;
 

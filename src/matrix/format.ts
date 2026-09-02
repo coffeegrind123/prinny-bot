@@ -11,6 +11,8 @@
 
 import { Marked } from 'marked'
 
+import { ALLOWED_LINK_SCHEMES } from '../protocol/constants.js'
+
 // Isolated marked instance, not the shared `marked` singleton.
 //
 // This is a library: the app embedding it may well configure `marked` for its
@@ -29,6 +31,25 @@ function escape(s: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+}
+
+/**
+ * Whether a markdown link's target may become an `href`.
+ *
+ * Absolute URLs only. A relative or fragment-only target has no base to
+ * resolve against in a Matrix message, so it is not a link anyone can follow —
+ * and `new URL()` rejecting it is what keeps the scheme check from being
+ * bypassed by something that only looks relative.
+ */
+function isAllowedLinkHref(raw: string): boolean {
+  if (!raw) return false
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    return false
+  }
+  return (ALLOWED_LINK_SCHEMES as readonly string[]).includes(parsed.protocol)
 }
 
 type AnyToken = Record<string, unknown> & { type?: string }
@@ -72,8 +93,13 @@ function renderToken(tok: AnyToken): string {
     }
 
     case 'link': {
-      const href = String(tok.href ?? '').replace(/"/g, '&quot;')
-      return `<a href="${href}">${renderTokens(tok.tokens as AnyToken[] | undefined)}</a>`
+      const raw = String(tok.href ?? '')
+      const label = renderTokens(tok.tokens as AnyToken[] | undefined)
+      // An unopenable scheme keeps its text and loses its anchor, rather than
+      // becoming an <a href="javascript:…"> for the client to strip. Dropping
+      // the whole token would silently delete words the author wrote.
+      if (!isAllowedLinkHref(raw)) return label
+      return `<a href="${raw.replace(/"/g, '&quot;')}">${label}</a>`
     }
 
     case 'br':

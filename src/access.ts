@@ -143,6 +143,13 @@ export type RateLimitOptions = {
   max?: number;
   /** Window length in milliseconds. Default 5 minutes. */
   windowMs?: number;
+  /**
+   * Distinct keys tracked at once. Default 10000.
+   *
+   * A ceiling, not a budget: keys age out on their own a window after their
+   * last hit, and this only bounds how many can pile up inside one window.
+   */
+  maxKeys?: number;
 };
 
 /**
@@ -152,6 +159,12 @@ export type RateLimitOptions = {
  * Sliding rather than fixed-bucket: a fixed window lets a sender spend the
  * whole budget at 4:59 and the whole next budget at 5:01, which is exactly
  * double the intended rate at the moment it matters least.
+ *
+ * The key space is bounded, and has to be. Callers key on things a stranger
+ * chooses — `Bot` keys refusals by sender MXID, and refusals are exactly the
+ * path an unwelcome sender takes — so a map that only ever grew would turn
+ * "messages from accounts you have never allowed" into unbounded memory in the
+ * bot process. Keys are swept once per window and capped as a backstop.
  */
 export class RateLimiter {
   private readonly hits = new Map<string, number[]>();
@@ -160,24 +173,69 @@ export class RateLimiter {
 
   private readonly windowMs: number;
 
+  private readonly maxKeys: number;
+
+  private nextSweep = 0;
+
   constructor(options: RateLimitOptions = {}) {
     this.max = options.max ?? 10;
     this.windowMs = options.windowMs ?? 5 * 60 * 1000;
+    this.maxKeys = options.maxKeys ?? 10_000;
+  }
+
+  /** Keys currently tracked. Exposed so the bound can be asserted in tests. */
+  get size(): number {
+    return this.hits.size;
+  }
+
+  /**
+   * Drop keys whose hits have all aged out.
+   *
+   * Amortised: a full pass is O(keys), so it runs at most once per window
+   * rather than on every call. `keep` is the key being handled right now,
+   * which is about to be rewritten anyway.
+   */
+  private sweep(now: number, keep: string): void {
+    if (now < this.nextSweep) return;
+    this.nextSweep = now + this.windowMs;
+    const cutoff = now - this.windowMs;
+    for (const [key, times] of this.hits) {
+      if (key === keep) continue;
+      const last = times[times.length - 1];
+      if (last === undefined || last <= cutoff) this.hits.delete(key);
+    }
+  }
+
+  /**
+   * Backstop for a flood that arrives faster than one window.
+   *
+   * Evicts in insertion order — a `Map` preserves it — so the oldest keys go
+   * first. Never evicts the key being handled: it is the one the caller is
+   * about to read a retry time from.
+   */
+  private enforceCap(keep: string): void {
+    if (this.hits.size <= this.maxKeys) return;
+    for (const key of this.hits.keys()) {
+      if (this.hits.size <= this.maxKeys) break;
+      if (key === keep) continue;
+      this.hits.delete(key);
+    }
   }
 
   /** Record a hit. Returns false when the caller is over budget. */
   check(key: string, now = Date.now()): boolean {
+    this.sweep(now, key);
+
     const cutoff = now - this.windowMs;
     const recent = (this.hits.get(key) ?? []).filter((ts) => ts > cutoff);
+    const allowed = recent.length < this.max;
+    if (allowed) recent.push(now);
 
-    if (recent.length >= this.max) {
-      this.hits.set(key, recent);
-      return false;
-    }
-
-    recent.push(now);
+    // Stored on both paths: a refused caller still needs its window on record,
+    // or `retryAfterSeconds` has nothing to answer with.
     this.hits.set(key, recent);
-    return true;
+    this.enforceCap(key);
+    return allowed;
   }
 
   /** Seconds until the caller's oldest hit falls out of the window. */

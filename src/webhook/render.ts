@@ -10,6 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import { markdownToMatrixHtml, stripHtml } from '../matrix/format.js';
 import type { InlineKeyboardButton, InlineKeyboardMarkup } from '../protocol/types.js';
+import { isAllowedButtonUrl } from '../protocol/validate.js';
 import {
   ButtonStyle,
   ComponentType,
@@ -410,8 +411,17 @@ export function renderComponents(
                 text: buttonLabel(child.label, child.emoji),
                 style: buttonStyleFor(child.style),
               };
-              if (child.style === ButtonStyle.Link && child.url) button.url = child.url;
-              else if (child.custom_id) button.callback_data = child.custom_id;
+              if (child.style === ButtonStyle.Link) {
+                // The keyboard builder and the inbound validator both apply
+                // this allowlist; a Discord payload reaches the wire through
+                // neither, so it has to be applied here too. A rejected url
+                // leaves a button with no action, which renders greyed out —
+                // the documented outcome for a button this version cannot act
+                // on, and better than reflowing the sender's layout.
+                if (isAllowedButtonUrl(child.url)) button.url = child.url;
+              } else if (child.custom_id) {
+                button.callback_data = child.custom_id;
+              }
               row.push(button);
               return;
             }
