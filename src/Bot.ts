@@ -36,7 +36,7 @@ import { BotContentKey, BotEventType, BotRelType } from './protocol/constants.js
 import type { BotInfo, MenuButton, ReplyMarkup } from './protocol/types.js';
 import { isInlineKeyboardMarkup } from './protocol/types.js';
 import { sanitizeReplyMarkup } from './protocol/validate.js';
-import { matchFallbackReply, plainBodyOf } from './keyboard/fallback.js';
+import { flattenInlineKeyboard, matchFallbackReply, plainBodyOf } from './keyboard/fallback.js';
 import { SessionManager, type SessionOptions } from './session.js';
 
 export type BotOptions<S> = {
@@ -565,7 +565,25 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
     // Only honour a press against a message this bot actually sent. Otherwise
     // any member could forge a callback naming someone else's message and have
     // the bot act on it.
-    if (target && target.getSender() !== this.options.userId) return undefined;
+    //
+    // FAIL CLOSED when the event cannot be resolved. This used to read
+    // `if (target && ...)`, so an event id that is not in the loaded live
+    // timeline - a fabricated one, or one from another room - skipped the check
+    // entirely and the forged callback was accepted. An unresolvable target is
+    // not permission; it is the absence of proof.
+    if (!target || target.getSender() !== this.options.userId) return undefined;
+
+    // A press must also carry callback data the bot actually rendered on THAT
+    // message. Without this, an authorised-but-unprivileged member could invoke
+    // any handler with any payload - `admin:delete:42` - regardless of which
+    // buttons were shown to them. `matchFallbackReply` already binds the
+    // plain-text path to a real button; this is the same rule for the native one.
+    const targetMarkup = this.markupOf(target);
+    if (!targetMarkup || !isInlineKeyboardMarkup(targetMarkup)) return undefined;
+    const offered = flattenInlineKeyboard(targetMarkup).some(
+      (flat) => flat.button.callback_data === content.data
+    );
+    if (!offered) return undefined;
 
     const query: CallbackQuery = {
       id: content.id,

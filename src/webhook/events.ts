@@ -222,13 +222,35 @@ export type ReceiverResult =
  * removes the URL if one is accepted, so nothing may be parsed, logged or acted
  * on before the signature has been checked.
  */
+/**
+ * How far out of date a signed delivery may be. Discord and Slack both use five
+ * minutes. Without a window the signature alone makes a captured request valid
+ * forever, so anyone who recovers one delivery - a proxy, a log aggregator, a
+ * TLS-terminating balancer - can replay it at will.
+ */
+export const WEBHOOK_REPLAY_WINDOW_MS = 5 * 60 * 1000;
+
 export function handleWebhookEventRequest(params: {
   publicKey: string;
   signature: string | undefined;
   timestamp: string | undefined;
   body: Buffer | string;
+  /** Override for tests; defaults to the current clock. */
+  nowMs?: number;
+  /** Override the freshness window, or set to 0 to disable it. */
+  replayWindowMs?: number;
 }): ReceiverResult {
   if (!verifyWebhookSignature(params)) return { status: 401 };
+
+  // Checked AFTER the signature, so an unsigned request still cannot use this
+  // path as a clock oracle, and BEFORE the body is parsed or acted on.
+  const windowMs = params.replayWindowMs ?? WEBHOOK_REPLAY_WINDOW_MS;
+  if (windowMs > 0) {
+    const sentMs = Number(params.timestamp) * 1000;
+    if (!Number.isFinite(sentMs)) return { status: 401 };
+    const nowMs = params.nowMs ?? Date.now();
+    if (Math.abs(nowMs - sentMs) > windowMs) return { status: 401 };
+  }
 
   let parsed: WebhookEventPayload;
   try {

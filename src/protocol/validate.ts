@@ -77,7 +77,7 @@ const stripUnsafe = (value: string, keepBreaks = false): string => {
  * Line breaks go too - every caller is a label, a placeholder or a name, all
  * of which are one line by definition.
  */
-const cleanString = (v: unknown, max: number): string | undefined => {
+export const cleanString = (v: unknown, max: number): string | undefined => {
   if (typeof v !== 'string') return undefined;
   const trimmed = stripUnsafe(v).trim();
   if (trimmed.length === 0) return undefined;

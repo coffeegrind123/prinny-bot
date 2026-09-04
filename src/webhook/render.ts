@@ -41,6 +41,22 @@ const escapeHtml = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /**
+ * An embed URL becomes an `href` in `formatted_body`. `escapeHtml` stops the
+ * value breaking out of the attribute, but says nothing about the scheme, so
+ * `javascript:` and `data:` used to survive into the message. Every other URL
+ * sink in this package - markdown links, link buttons a few hundred lines below
+ * - runs the allowlist; embeds were the one path that did not.
+ *
+ * Returns the anchor when the scheme is permitted, and the escaped label alone
+ * when it is not, so a rejected URL loses its link rather than the message
+ * losing its text.
+ */
+const anchorOrLabel = (url: string | undefined, innerHtml: string): string =>
+  url !== undefined && isAllowedButtonUrl(url)
+    ? `<a href="${escapeHtml(url)}">${innerHtml}</a>`
+    : innerHtml;
+
+/**
  * Sentinels carry pre-rendered HTML through the markdown parser untouched.
  *
  * `markdownToMatrixHtml` escapes raw HTML on purpose (a bot must not be able to
@@ -280,9 +296,7 @@ export function renderEmbed(embed: DiscordEmbed, ctx: RenderContext = {}): Disco
   if (embed.author?.name) {
     const name = escapeHtml(embed.author.name);
     lines.push(
-      embed.author.url
-        ? `<b><a href="${escapeHtml(embed.author.url)}">${name}</a></b>`
-        : `<b>${name}</b>`
+      `<b>${anchorOrLabel(embed.author.url, name)}</b>`
     );
     plain.push(embed.author.name);
   }
@@ -290,7 +304,7 @@ export function renderEmbed(embed: DiscordEmbed, ctx: RenderContext = {}): Disco
   if (embed.title) {
     const title = stripParagraph(renderDiscordText(embed.title, ctx).html);
     lines.push(
-      embed.url ? `<b><a href="${escapeHtml(embed.url)}">${title}</a></b>` : `<b>${title}</b>`
+      `<b>${anchorOrLabel(embed.url, title)}</b>`
     );
     plain.push(embed.title);
   }
@@ -312,13 +326,11 @@ export function renderEmbed(embed: DiscordEmbed, ctx: RenderContext = {}): Disco
   // remote URL, and a Matrix client that loaded it would leak the reader's IP
   // to whoever the webhook named. `<img>` is reserved for mxc content.
   if (embed.image?.url) {
-    lines.push(`<a href="${escapeHtml(embed.image.url)}">${escapeHtml(embed.image.url)}</a>`);
+    lines.push(anchorOrLabel(embed.image.url, escapeHtml(embed.image.url)));
     plain.push(embed.image.url);
   }
   if (embed.thumbnail?.url) {
-    lines.push(
-      `<a href="${escapeHtml(embed.thumbnail.url)}">${escapeHtml(embed.thumbnail.url)}</a>`
-    );
+    lines.push(anchorOrLabel(embed.thumbnail.url, escapeHtml(embed.thumbnail.url)));
     plain.push(embed.thumbnail.url);
   }
 

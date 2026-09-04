@@ -22,7 +22,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from 'node:crypto';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { buildMediaContent, uploadAttachment } from '../matrix/media.js';
-import { BotContentKey } from '../protocol/constants.js';
+import { BotContentKey, Limits } from '../protocol/constants.js';
+import { cleanString } from '../protocol/validate.js';
 import { buildFallbackBodies } from '../keyboard/fallback.js';
 import { generateWebhookToken, SnowflakeGenerator } from './snowflake.js';
 import {
@@ -36,6 +37,34 @@ import {
 import { parseBoundary, parseMultipart } from './multipart.js';
 import { slackToExecuteBody, type SlackWebhookBody } from './slack.js';
 import { githubToExecuteBody } from './github.js';
+
+/**
+ * Discord's documented Execute Webhook attachment limit. Enforced so one
+ * request cannot fan out into an unbounded number of homeserver uploads.
+ */
+const MAX_ATTACHMENTS = 10;
+
+/**
+ * `decodeURI`/`decodeURIComponent` throw URIError on a malformed percent
+ * escape, and `new URL` does not reject one first. Returning null instead of
+ * throwing keeps a bad path on the normal 404 route rather than turning it into
+ * an unhandled rejection that terminates the process.
+ */
+function safeDecodeURI(value: string): string | null {
+  try {
+    return decodeURI(value);
+  } catch {
+    return null;
+  }
+}
+
+function safeDecodeURIComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
 import {
   buildMentions,
   everyoneAllowed,
@@ -270,7 +299,7 @@ export class WebhookServer {
 
   listen(port: number, host = '127.0.0.1'): Promise<void> {
     this.server = createServer((req, res) => {
-      void this.handle(req, res);
+      this.handleSafely(req, res);
     });
     return new Promise((resolve) => {
       this.server?.listen(port, host, () => resolve());
@@ -290,8 +319,31 @@ export class WebhookServer {
   /** The node request handler, exposed so it can be mounted in another server. */
   get requestListener(): (req: IncomingMessage, res: ServerResponse) => void {
     return (req, res) => {
-      void this.handle(req, res);
+      this.handleSafely(req, res);
     };
+  }
+
+  /**
+   * `handle` is async, so an unexpected throw becomes a rejected promise. Both
+   * entry points funnel through here so no request path can ever produce an
+   * unhandled rejection, which under Node's default settings terminates the
+   * process.
+   */
+  private handleSafely(req: IncomingMessage, res: ServerResponse): void {
+    this.handle(req, res).catch((e: unknown) => {
+      try {
+        if (!res.headersSent) {
+          sendJson(res, 500, {
+            code: 0,
+            message: e instanceof Error ? e.message : 'Internal error',
+          });
+        } else {
+          res.end();
+        }
+      } catch {
+        // The socket is already gone; nothing further to do.
+      }
+    });
   }
 
   private route(method: string, path: string, handler: Handler): void {
@@ -308,7 +360,16 @@ export class WebhookServer {
       return;
     }
 
-    const path = decodeURI(url.pathname);
+    // `new URL` does NOT validate percent-escapes, so `/%zz` parses fine and
+    // `decodeURI` then throws URIError. That throw used to escape `handle`
+    // entirely - it sits outside the try above, and both call sites invoke this
+    // method as a bare `void`, so the rejection was unhandled and killed the
+    // process. One unauthenticated request, repeatable.
+    const path = safeDecodeURI(url.pathname);
+    if (path === null) {
+      sendError(res, DiscordError.NotFound);
+      return;
+    }
     const matches = this.routes
       .map((route) => ({ route, match: route.pattern.exec(path) }))
       .filter((entry) => entry.match !== null);
@@ -325,9 +386,14 @@ export class WebhookServer {
     }
 
     const params: RouteParams = {};
-    chosen.route.keys.forEach((key, index) => {
-      params[key] = decodeURIComponent(chosen.match?.[index + 1] ?? '');
-    });
+    for (const [index, key] of chosen.route.keys.entries()) {
+      const decoded = safeDecodeURIComponent(chosen.match?.[index + 1] ?? '');
+      if (decoded === null) {
+        sendError(res, DiscordError.NotFound);
+        return;
+      }
+      params[key] = decoded;
+    }
 
     let body: Buffer;
     try {
@@ -738,6 +804,7 @@ export class WebhookServer {
     const fields = parseMultipart(body, boundary);
     const files: UploadedFile[] = [];
     let payload: ExecuteWebhookBody = {};
+    let tooManyFiles = false;
 
     fields.forEach((field) => {
       if (field.name === 'payload_json') {
@@ -749,6 +816,14 @@ export class WebhookServer {
       // wild; it is treated as index 0 rather than dropped.
       const index = match?.[1] !== undefined ? Number(match[1]) : field.name === 'file' ? 0 : -1;
       if (index < 0) return;
+      // Discord caps Execute Webhook at 10 attachments. Without a cap here one
+      // body-cap-sized request built from minimal parts becomes hundreds of
+      // thousands of sequential homeserver uploads and room messages - the
+      // embed list two blocks down was already capped for the same reason.
+      if (files.length >= MAX_ATTACHMENTS) {
+        tooManyFiles = true;
+        return;
+      }
       files.push({
         index,
         filename: field.filename ?? `file-${index}`,
@@ -756,6 +831,11 @@ export class WebhookServer {
         data: field.data,
       });
     });
+
+    // Over-limit is refused rather than silently truncated: a caller that sent
+    // 50 attachments should be told, the way Discord tells them, not have 40
+    // quietly dropped.
+    if (tooManyFiles) return undefined;
 
     return { payload, files };
   }
@@ -984,11 +1064,22 @@ export class WebhookServer {
     entry: StoredWebhook,
     payload: ExecuteWebhookBody
   ): Record<string, unknown> | undefined {
-    const username = payload.username ?? entry.webhook.name ?? undefined;
-    if (!username && !payload.avatar_url) return undefined;
+    // README: "The same rule applies to `avatar_url`, where only `mxc://` is
+    // honoured", because rendering an arbitrary remote URL would leak every
+    // reader's IP address to whoever holds the webhook token. That rule is
+    // enforced here; the embed-image path already implements its half.
+    const rawUsername = payload.username ?? entry.webhook.name ?? undefined;
+    const username = rawUsername
+      ? cleanString(rawUsername, Limits.BUTTON_TEXT_MAX_LENGTH)
+      : undefined;
+    const avatarUrl =
+      typeof payload.avatar_url === 'string' && payload.avatar_url.startsWith('mxc://')
+        ? payload.avatar_url
+        : undefined;
+    if (!username && !avatarUrl) return undefined;
     const identity: Record<string, unknown> = { id: entry.webhook.id };
     if (username) identity.username = username;
-    if (payload.avatar_url) identity.avatar_url = payload.avatar_url;
+    if (avatarUrl) identity.avatar_url = avatarUrl;
     return identity;
   }
 

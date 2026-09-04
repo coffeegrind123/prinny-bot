@@ -329,6 +329,51 @@ export const isMediaContent = (content: unknown): content is MatrixMediaContent 
  * A bot that saves what it is sent is one `../` away from writing outside its
  * working directory, and the name comes from whoever uploaded the file.
  */
+/**
+ * Read a response body with a hard cap, aborting as soon as the cap is passed.
+ *
+ * The previous form materialised the whole body with `arrayBuffer()` and only
+ * then compared its length, so the allocation had already happened by the time
+ * the limit was reported - the exact "unbounded read" this module says a bot
+ * should never be handed. `Content-Length` is consulted first so an honest
+ * server is refused before a single byte is transferred, and the streamed
+ * accumulation is what bounds a server that lies about it.
+ */
+async function readCapped(response: Response, maxBytes: number, url: string): Promise<Buffer> {
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`attachment too large (${declared} bytes > ${maxBytes}) for ${url}`);
+  }
+
+  const body = response.body;
+  if (!body) {
+    const buf = Buffer.from(await response.arrayBuffer());
+    if (buf.length > maxBytes) {
+      throw new Error(`attachment too large (${buf.length} bytes > ${maxBytes}) for ${url}`);
+    }
+    return buf;
+  }
+
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`attachment too large (> ${maxBytes} bytes) for ${url}`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  return Buffer.concat(chunks, total);
+}
+
 export const sanitizeFilename = (name: string | undefined): string => {
   const base = (name ?? 'upload.bin').replace(/[/\\]/g, '_').replace(/^\.+/, '');
   const cleaned = base
@@ -375,10 +420,7 @@ const fetchMxc = async (
         if (attempt.auth && (response.status === 401 || response.status === 404)) continue;
         throw lastError;
       }
-      const buf = Buffer.from(await response.arrayBuffer());
-      if (buf.length > maxBytes) {
-        throw new Error(`attachment too large (${buf.length} bytes > ${maxBytes})`);
-      }
+      const buf = await readCapped(response, maxBytes, attempt.url);
       return buf;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));

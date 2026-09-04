@@ -114,18 +114,60 @@ describe('webhook server', () => {
     expect(/^\d+$/.test(message.id)).toBe(true);
   });
 
-  it('carries username and avatar as a per-message identity', async () => {
+  it('carries username and an mxc avatar as a per-message identity', async () => {
+    const { id, token } = await createWebhook();
+    await fetch(`${base}/api/webhooks/${id}/${token}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content: 'hi',
+        username: 'Deploy',
+        avatar_url: 'mxc://example.org/abc',
+      }),
+    });
+    expect(sent[0]?.content['in.prinny.webhook']).toEqual({
+      id,
+      username: 'Deploy',
+      avatar_url: 'mxc://example.org/abc',
+    });
+  });
+
+  // README: "The same rule applies to `avatar_url`, where only `mxc://` is
+  // honoured" - rendering an arbitrary remote URL would leak every reader's IP
+  // address to whoever holds the webhook token.
+  it('drops a non-mxc avatar_url rather than relaying it', async () => {
     const { id, token } = await createWebhook();
     await fetch(`${base}/api/webhooks/${id}/${token}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ content: 'hi', username: 'Deploy', avatar_url: 'https://x/y.png' }),
     });
-    expect(sent[0]?.content['in.prinny.webhook']).toEqual({
-      id,
-      username: 'Deploy',
-      avatar_url: 'https://x/y.png',
+    expect(sent[0]?.content['in.prinny.webhook']).toEqual({ id, username: 'Deploy' });
+  });
+
+  it('refuses more attachments than Discord permits', async () => {
+    const { id, token } = await createWebhook();
+    const boundary = 'testboundary';
+    const parts = Array.from({ length: 12 }, (_, i) =>
+      `--${boundary}\r\nContent-Disposition: form-data; name="files[${i}]"; filename="f${i}.txt"\r\n` +
+      `Content-Type: text/plain\r\n\r\nx\r\n`
+    ).join('');
+    const response = await fetch(`${base}/api/webhooks/${id}/${token}`, {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body: `${parts}--${boundary}--\r\n`,
     });
+    expect(response.status).toBe(400);
+  });
+
+  // A malformed percent-escape used to throw URIError out of the async handler,
+  // which Node turns into an unhandled rejection and a dead process.
+  it('answers a malformed percent-escape instead of dying', async () => {
+    const response = await fetch(`${base}/%zz`);
+    expect(response.status).toBe(404);
+    // Still serving: the process survived the previous request.
+    const after = await fetch(`${base}/api/webhooks/does-not-exist/nope`, { method: 'POST' });
+    expect(after.status).toBe(404);
   });
 
   it('refuses an empty message', async () => {

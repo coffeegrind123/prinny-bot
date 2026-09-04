@@ -69,7 +69,9 @@ describe('webhook event receiver', () => {
     const body = JSON.stringify({ version: 1, application_id: '1', type: WebhookEventType.Ping });
     const timestamp = '1700000000';
     const signature = signWebhookBody({ privateKey, timestamp, body });
-    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body });
+    // Pinned clock: these assert signature handling, not the freshness window.
+    const nowMs = Number(timestamp) * 1000;
+    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body, nowMs });
     expect(result.status).toBe(204);
     expect(result.status === 204 && result.ping).toBe(true);
   });
@@ -95,8 +97,39 @@ describe('webhook event receiver', () => {
     });
     const timestamp = '1700000000';
     const signature = signWebhookBody({ privateKey, timestamp, body });
-    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body });
+    const nowMs = Number(timestamp) * 1000;
+    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body, nowMs });
     expect(result.status === 204 && result.event?.type).toBe('ENTITLEMENT_CREATE');
+  });
+
+  it('refuses a correctly signed delivery that is outside the replay window', () => {
+    const { privateKey, publicKey } = keyPair();
+    const body = JSON.stringify({ version: 1, application_id: '1', type: WebhookEventType.Ping });
+    const timestamp = '1700000000';
+    const signature = signWebhookBody({ privateKey, timestamp, body });
+    // The signature is valid; only the age is wrong. This is the captured
+    // delivery a proxy or log aggregator could otherwise replay forever.
+    const nowMs = Number(timestamp) * 1000 + 10 * 60 * 1000;
+    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body, nowMs });
+    expect(result.status).toBe(401);
+  });
+
+  it('refuses a delivery whose timestamp is not a number', () => {
+    const { privateKey, publicKey } = keyPair();
+    const body = JSON.stringify({ version: 1, application_id: '1', type: WebhookEventType.Ping });
+    const timestamp = 'not-a-timestamp';
+    const signature = signWebhookBody({ privateKey, timestamp, body });
+    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body });
+    expect(result.status).toBe(401);
+  });
+
+  it('still accepts a fresh delivery against the real clock', () => {
+    const { privateKey, publicKey } = keyPair();
+    const body = JSON.stringify({ version: 1, application_id: '1', type: WebhookEventType.Ping });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = signWebhookBody({ privateKey, timestamp, body });
+    const result = handleWebhookEventRequest({ publicKey, signature, timestamp, body });
+    expect(result.status).toBe(204);
   });
 });
 

@@ -130,6 +130,17 @@ export const hasFfmpeg = async (): Promise<boolean> => {
  * Rejects when ffmpeg is missing or exits non-zero — call `hasFfmpeg()` first
  * if you want to degrade rather than catch.
  */
+/**
+ * Bounds on decoding untrusted audio. A voice message is remote-supplied, and a
+ * highly compressed input expands enormously as raw PCM (16 kHz mono s16le is
+ * ~32 KB/s), so without these an attacker chooses how much memory the process
+ * allocates and how long it stays wedged.
+ */
+const PCM_MAX_DURATION_S = 15 * 60;
+const PCM_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+const PCM_STDERR_MAX_BYTES = 64 * 1024;
+const PCM_TIMEOUT_MS = 60_000;
+
 export const audioToPcm = (
   input: Buffer,
   sampleRate = PCM_SAMPLE_RATE
@@ -142,6 +153,9 @@ export const audioToPcm = (
         [
           '-hide_banner', '-loglevel', 'error',
           '-i', 'pipe:0',
+          // Ceiling on decoded duration, so a compressed input cannot expand
+          // without bound no matter how long it claims to be.
+          '-t', String(PCM_MAX_DURATION_S),
           '-f', 's16le', '-ac', '1', '-ar', String(sampleRate),
           'pipe:1',
         ],
@@ -154,12 +168,54 @@ export const audioToPcm = (
 
     const out: Buffer[] = [];
     const err: Buffer[] = [];
-    proc.stdout.on('data', (chunk: Buffer) => out.push(chunk));
-    proc.stderr.on('data', (chunk: Buffer) => err.push(chunk));
-    proc.on('error', reject);
+    let outBytes = 0;
+    let errBytes = 0;
+    let settled = false;
+
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const kill = (message: string): void => {
+      finish(() => {
+        proc.kill('SIGKILL');
+        reject(new Error(message));
+      });
+    };
+
+    // A decoder that never exits would otherwise leave the awaiting handler
+    // hanging forever.
+    const timer = setTimeout(
+      () => kill(`ffmpeg timed out after ${PCM_TIMEOUT_MS}ms`),
+      PCM_TIMEOUT_MS
+    );
+    timer.unref?.();
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      outBytes += chunk.length;
+      if (outBytes > PCM_MAX_OUTPUT_BYTES) {
+        kill(`ffmpeg output exceeded ${PCM_MAX_OUTPUT_BYTES} bytes`);
+        return;
+      }
+      out.push(chunk);
+    });
+    proc.stderr.on('data', (chunk: Buffer) => {
+      if (errBytes >= PCM_STDERR_MAX_BYTES) return;
+      errBytes += chunk.length;
+      err.push(chunk);
+    });
+    proc.on('error', (error) => finish(() => reject(error)));
     proc.on('exit', (code) => {
-      if (code === 0) resolve(Buffer.concat(out));
-      else reject(new Error(`ffmpeg exit ${code}: ${Buffer.concat(err).toString().slice(0, 200)}`));
+      finish(() => {
+        if (code === 0) resolve(Buffer.concat(out, outBytes));
+        else
+          reject(
+            new Error(`ffmpeg exit ${code}: ${Buffer.concat(err).toString().slice(0, 200)}`)
+          );
+      });
     });
 
     // EPIPE if ffmpeg dies before reading it all; the exit handler reports why.
