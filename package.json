@@ -57,7 +57,7 @@
   "dependencies": {
     "fake-indexeddb": "^6.2.5",
     "marked": "^18.0.10",
-    "matrix-js-sdk": "^42.2.0"
+    "matrix-js-sdk": "^44.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
