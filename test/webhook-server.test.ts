@@ -277,6 +277,56 @@ describe('webhook server', () => {
     expect(String(replacement?.body).startsWith('* ')).toBe(true);
   });
 
+  it('keeps the per-message identity through an edit', async () => {
+    const { id, token } = await createWebhook();
+    const created = await fetch(`${base}/api/webhooks/${id}/${token}?wait=true`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content: 'before',
+        username: 'Deploy',
+        avatar_url: 'mxc://example.org/abc',
+      }),
+    });
+    const message = (await created.json()) as { id: string };
+
+    await fetch(`${base}/api/webhooks/${id}/${token}/messages/${message.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'after' }),
+    });
+    const replacement = sent[sent.length - 1]?.content ?? {};
+    const newContent = replacement['m.new_content'] as Record<string, unknown>;
+    const identity = { id, username: 'Deploy', avatar_url: 'mxc://example.org/abc' };
+    // Clients render an edited event from `m.new_content`, so that is where it matters.
+    expect(newContent['in.prinny.webhook']).toEqual(identity);
+    expect(replacement['in.prinny.webhook']).toEqual(identity);
+  });
+
+  it('puts the identity on attachments, polls and a new thread root too', async () => {
+    const { id, token } = await createWebhook();
+    const form = new FormData();
+    form.append(
+      'payload_json',
+      JSON.stringify({
+        username: 'Deploy',
+        thread_name: 'Release 1.2',
+        poll: { question: { text: 'Ship?' }, answers: [{ poll_media: { text: 'yes' } }] },
+      })
+    );
+    form.append('files[0]', new Blob([new Uint8Array([1])], { type: 'image/png' }), 'a.png');
+    const response = await fetch(`${base}/api/webhooks/${id}/${token}`, {
+      method: 'POST',
+      body: form,
+    });
+    expect(response.status).toBe(204);
+    // thread root, poll, file
+    expect(sent).toHaveLength(3);
+    sent.forEach(({ content }) => {
+      expect(content['in.prinny.webhook']).toEqual({ id, username: 'Deploy' });
+    });
+  });
+
   it('deletes a message it sent', async () => {
     const { id, token } = await createWebhook();
     const created = await fetch(`${base}/api/webhooks/${id}/${token}?wait=true`, {

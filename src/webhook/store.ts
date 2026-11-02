@@ -60,6 +60,13 @@ export type StoredMessage = {
   eventId: string;
   /** Matrix thread root, when the message was sent into a thread. */
   threadId?: string;
+  /**
+   * The per-message identity it was sent under. Discord's PATCH cannot change
+   * it, and a Matrix edit replaces the whole content, so an edit has to put
+   * the original back.
+   */
+  username?: string;
+  avatarUrl?: string;
   channelId: string;
   createdAt: number;
 };

@@ -900,12 +900,20 @@ export class WebhookServer {
 
     // A forum-style `thread_name` creates the thread by posting its root, then
     // everything else lands underneath it.
+    // Every event this request produces is from the same sender identity, not
+    // just the text: the thread root, the poll and each attachment too.
+    const identity = this.webhookIdentity(entry, merged);
+    const withIdentity = <T extends Record<string, unknown>>(content: T): T => {
+      if (identity) (content as Record<string, unknown>)[WEBHOOK_IDENTITY_KEY] = identity;
+      return content;
+    };
+
     let rootEventId = threadRoot;
     if (!rootEventId && merged.thread_name) {
-      const created = await this.client.sendMessage(roomId, {
-        msgtype: 'm.text',
-        body: merged.thread_name,
-      } as never);
+      const created = await this.client.sendMessage(
+        roomId,
+        withIdentity({ msgtype: 'm.text', body: merged.thread_name }) as never
+      );
       rootEventId = created.event_id;
     }
 
@@ -919,7 +927,7 @@ export class WebhookServer {
     }
 
     if (merged.poll) {
-      const pollContent = renderPoll(merged.poll);
+      const pollContent = withIdentity(renderPoll(merged.poll));
       if (rootEventId) pollContent['m.relates_to'] = threadRelation(rootEventId);
       const sent = await this.client.sendEvent(
         roomId,
@@ -938,10 +946,8 @@ export class WebhookServer {
         filename: described?.filename ?? file.filename,
         mimeType: file.contentType,
       });
-      const mediaContent = buildMediaContent(
-        msgtypeFor(uploaded.mimeType),
-        described?.filename ?? file.filename,
-        uploaded
+      const mediaContent = withIdentity(
+        buildMediaContent(msgtypeFor(uploaded.mimeType), described?.filename ?? file.filename, uploaded)
       );
       if (described?.description) mediaContent.body = described.description;
       if (rootEventId) mediaContent['m.relates_to'] = threadRelation(rootEventId);
@@ -963,6 +969,8 @@ export class WebhookServer {
       createdAt: Date.now(),
     };
     if (rootEventId) stored.threadId = rootEventId;
+    if (merged.username) stored.username = merged.username;
+    if (merged.avatar_url) stored.avatarUrl = merged.avatar_url;
     this.store.putMessage(stored);
 
     if (!wait) {
@@ -1058,7 +1066,6 @@ export class WebhookServer {
    * message's author - which is exactly what Discord shows for a webhook.
    *
    * Clients that do not know the key show the bot's own name, which is true.
-   * The name is also prefixed into the fallback body for the same reason.
    */
   private webhookIdentity(
     entry: StoredWebhook,
@@ -1159,6 +1166,10 @@ export class WebhookServer {
       executeBody.allowed_mentions = payload.allowed_mentions;
     }
     if (payload.flags !== undefined && payload.flags !== null) executeBody.flags = payload.flags;
+    // Discord cannot change who a message is from, and a Matrix edit replaces
+    // the whole content, so the original identity goes back in.
+    if (stored.username) executeBody.username = stored.username;
+    if (stored.avatarUrl) executeBody.avatar_url = stored.avatarUrl;
 
     const content = this.buildMessageContent(entry, executeBody, true);
     if (!content) {
