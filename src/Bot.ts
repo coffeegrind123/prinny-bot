@@ -73,6 +73,12 @@ export type BotOptions<S> = {
   /** Publish the command list into rooms as they are joined. Default true. */
   autoPublishCommands?: boolean;
   /**
+   * Set `"app.prinny.bot": true` on the bot's own member event in each room it
+   * publishes to, so clients show a BOT badge even where the info could not be
+   * published (spec §7). Default true.
+   */
+  markAsBot?: boolean;
+  /**
    * Treat a plain "1" or "Deploy" reply as a press of the matching button on
    * the bot's most recent keyboard in that room. Default true.
    *
@@ -229,6 +235,9 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
    * new room is the wrong shape.
    */
   async publishTo(roomId: string): Promise<void> {
+    if (this.options.markAsBot !== false && !(await this.api.markAsBot(roomId))) {
+      this.log(`could not set the bot flag on its member event in ${roomId}`);
+    }
     const result = await this.api.publishBotInfo(roomId, this.botInfo());
     if (result === 'timeline') {
       this.log(

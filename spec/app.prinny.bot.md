@@ -402,6 +402,11 @@ in a given room if either holds:
   for that user in that room, or
 - their `m.room.member` content carries `"app.prinny.bot": true`.
 
+The library sets the member flag in every room it publishes to (option
+`markAsBot`, default on). Rewriting one's own member event needs no power, so
+the flag is the badge that still works where the info fell back to the
+timeline. The bot's current member content is carried over unchanged.
+
 The badge is per-room and derived from what that user actually published there.
 It is a hint about behaviour, not a verified identity claim, and clients should
 not present it as one.

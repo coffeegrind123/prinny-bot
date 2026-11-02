@@ -572,6 +572,36 @@ export class Api {
     }
   }
 
+  /**
+   * Set `"app.prinny.bot": true` on this bot's own `m.room.member` (spec §7),
+   * so clients badge it even where it could not publish its info.
+   *
+   * Any joined user may rewrite their own member event, so this needs no power.
+   * The current content is carried over: dropping `displayname` or
+   * `avatar_url` would blank the bot's profile in the room.
+   */
+  async markAsBot(roomId: string): Promise<boolean> {
+    const userId = this.client.getUserId();
+    const member = userId ? this.client.getRoom(roomId)?.getMember(userId) : null;
+    const content = member?.events?.member?.getContent();
+    if (!userId || content?.membership !== 'join') return false;
+    if (content[BotContentKey.MemberFlag] === true) return true;
+
+    try {
+      await withRateLimitRetry(() =>
+        this.client.sendStateEvent(
+          roomId,
+          'm.room.member' as never,
+          { ...content, [BotContentKey.MemberFlag]: true } as never,
+          userId
+        )
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Telegram's `setChatMenuButton`, for one room. */
   async setChatMenuButton(roomId: string, info: BotInfo, menuButton: MenuButton): Promise<void> {
     await this.publishBotInfo(roomId, { ...info, menu_button: menuButton });
