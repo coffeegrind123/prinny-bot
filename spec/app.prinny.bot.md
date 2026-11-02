@@ -194,9 +194,30 @@ Telegram's `KeyboardButton` request fields (`request_users`, `request_chat`,
 A button carrying only those renders as a plain text button.
 
 **Persistence.** A reply keyboard outlives the message that delivered it. The
-client stores the active keyboard in **room account data** under
-`app.prinny.bot.keyboard`, keyed by bot MXID, so it survives a reload and
-follows the user across devices.
+client records each bot's latest reply-keyboard instruction in **room account
+data** under `app.prinny.bot.keyboard`, keyed by bot MXID, so it survives a
+reload, a sync gap and a long scrollback, and the user's dismissal follows them
+across devices:
+
+```json5
+{
+  "@deploybot:example.org": {
+    "event_id": "$abc",          // the message carrying the markup
+    "ts": 1730000000000,         // its origin_server_ts
+    "kind": "keyboard",          // or "remove" (ReplyKeyboardRemove)
+    "dismissed": true,           // optional: the user closed it
+    "used": true                 // optional: a one_time_keyboard was pressed
+  }
+}
+```
+
+Only references are stored, never the markup. Room account data is not
+encrypted, so copying the buttons into it would leak the contents of an
+encrypted message to the server. A client that needs a keyboard older than the
+timeline it has loaded fetches the event by id and decrypts it. A new
+instruction from the same bot replaces the entry and clears the flags. The
+newest instruction in the room wins, whichever bot sent it. `ForceReply` is a
+one-shot prompt and is not recorded.
 
 ### 2.3 `ReplyKeyboardRemove`
 
