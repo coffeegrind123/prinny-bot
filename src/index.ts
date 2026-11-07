@@ -58,6 +58,7 @@ export {
 } from './session.js';
 export {
   buildDeepLink,
+  buildDeepLinkMatrixUri,
   buildDeepLinkScheme,
   deepLinkStartMessage,
   parseDeepLink,

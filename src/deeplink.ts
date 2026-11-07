@@ -6,9 +6,16 @@
  * Opening one gets the user into a DM with the bot and sends `/start
  * invite_abc`. Everything a bot needs to hand out a link, and everything a
  * client needs to read one back.
+ *
+ * Three forms, all read by `parseDeepLink`: the https one above, `prinny://`
+ * for an installed client, and a standard `matrix:` URI (MSC2312) that any
+ * client can open as a chat, with the payload in our own parameter:
+ *
+ *     matrix:u/helper:example.org?action=chat&app.prinny.bot.start=invite_abc
  */
 
 import {
+  DEEP_LINK_MATRIX_START_PARAM,
   DEEP_LINK_ORIGIN,
   DEEP_LINK_PATH_PREFIX,
   DEEP_LINK_SCHEME,
@@ -65,6 +72,53 @@ export const buildDeepLinkScheme = (userId: string, payload?: string): string =>
   return url.toString();
 };
 
+/** MSC2312 path segments: percent-encoded, but `:` is a legal pchar and kept. */
+const encodeMatrixSegment = (segment: string): string =>
+  encodeURIComponent(segment).replace(/%3A/gi, ':');
+
+/**
+ * The `matrix:` URI form (MSC2312): `matrix:u/<bot>?action=chat`, which any
+ * client that speaks the scheme opens as a DM. Clients that know our
+ * parameter also send `/start <payload>`; the rest still open the chat.
+ *
+ * Without a payload this is a plain chat link, which `parseDeepLink` does not
+ * read back: nothing in it says the target is a bot, so a client must not
+ * send `/start` to whoever it names.
+ */
+export const buildDeepLinkMatrixUri = (userId: string, payload?: string): string => {
+  // Same checks, same errors as the https form
+  buildDeepLink(userId, payload);
+  const params = new URLSearchParams({ action: 'chat' });
+  if (payload !== undefined) params.set(DEEP_LINK_MATRIX_START_PARAM, payload);
+  return `matrix:u/${encodeMatrixSegment(userId.slice(1))}?${params.toString()}`;
+};
+
+/**
+ * The user and payload of a `matrix:u/...?action=chat` URI, or null.
+ *
+ * Only with our payload parameter: a bare chat link can point at a person,
+ * and following it must not make the client send them `/start`.
+ */
+const parseMatrixUri = (url: URL): DeepLink | null => {
+  // Non-special scheme: everything after `matrix:` up to `?` is the path.
+  const match = /^u\/([^/]+)$/.exec(url.pathname);
+  if (!match) return null;
+  // Only a chat link means "open a DM"; a bare user link is a profile.
+  if (url.searchParams.get('action') !== 'chat') return null;
+
+  let userId: string;
+  try {
+    userId = `@${decodeURIComponent(match[1]!)}`;
+  } catch {
+    return null;
+  }
+  if (!MXID_PATTERN.test(userId)) return null;
+
+  const payload = url.searchParams.get(DEEP_LINK_MATRIX_START_PARAM);
+  if (payload === null || !isValidDeepLinkPayload(payload)) return null;
+  return { userId, payload };
+};
+
 /**
  * Parse a deep link, or return null.
  *
@@ -79,6 +133,8 @@ export const parseDeepLink = (link: string): DeepLink | null => {
   } catch {
     return null;
   }
+
+  if (url.protocol === 'matrix:') return parseMatrixUri(url);
 
   let encodedUserId: string;
   if (url.protocol === DEEP_LINK_SCHEME) {

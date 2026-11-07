@@ -93,7 +93,7 @@ quietly break it for everyone not running one specific client.
 | `sendChatAction('typing')` | `ctx.typing()`, or `ctx.withTyping(fn)` |
 | `sendPhoto` / `sendDocument` / `sendAudio` / `sendVideo` / `sendVoice` / `sendSticker` | same names on `bot.api`, or `ctx.replyWithPhoto(...)` and friends |
 | `getFile` + download | `ctx.download()`, `ctx.attachment` |
-| deep links (`t.me/bot?start=x`) | `buildDeepLink(userId, payload)` |
+| deep links (`t.me/bot?start=x`) | `buildDeepLink(userId, payload)`, or `buildDeepLinkMatrixUri` for a standard `matrix:` chat link |
 
 Beyond Telegram: a `style` on inline buttons (`primary` / `danger`), an `args`
 usage hint on commands, and `/cmd@bot` addressing that a client can resolve for

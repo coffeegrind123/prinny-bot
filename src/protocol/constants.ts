@@ -110,3 +110,8 @@ export const DEEP_LINK_ORIGIN = 'https://prinny.app';
 export const DEEP_LINK_PATH_PREFIX = '/bot/';
 export const DEEP_LINK_SCHEME = 'prinny:';
 export const DEEP_LINK_SCHEME_HOST = 'bot';
+/**
+ * The `start` payload on a `matrix:u/<bot>?action=chat` URI (MSC2312), under
+ * our namespace until a proposal standardises it.
+ */
+export const DEEP_LINK_MATRIX_START_PARAM = 'app.prinny.bot.start';

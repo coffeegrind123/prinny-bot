@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CommandRegistry, isCommandForBot, parseCommand } from '../src/commands.js';
 import {
   buildDeepLink,
+  buildDeepLinkMatrixUri,
   buildDeepLinkScheme,
   deepLinkStartMessage,
   parseDeepLink,
@@ -181,6 +182,40 @@ describe('deep links', () => {
 
   it('rejects a custom-scheme link with the wrong host', () => {
     expect(parseDeepLink('prinny://room/@a:b.org')).toBeNull();
+  });
+
+  it('round-trips the matrix: URI form, which any client opens as a chat', () => {
+    const link = buildDeepLinkMatrixUri('@helper:example.org', 'invite_abc');
+    expect(link).toBe(
+      'matrix:u/helper:example.org?action=chat&app.prinny.bot.start=invite_abc'
+    );
+    expect(parseDeepLink(link)).toEqual({ userId: '@helper:example.org', payload: 'invite_abc' });
+  });
+
+  it('builds a plain chat link without a payload, and does not read one back', () => {
+    // Nothing in a bare chat link says the target is a bot, so a client must
+    // not answer it by sending /start to a person.
+    const link = buildDeepLinkMatrixUri('@helper:example.org');
+    expect(link).toBe('matrix:u/helper:example.org?action=chat');
+    expect(parseDeepLink(link)).toBeNull();
+  });
+
+  it('reads a matrix: URI only as a chat link, with a legal payload', () => {
+    // Without action=chat it is a profile link, not "start a conversation".
+    expect(parseDeepLink('matrix:u/a:b.org?app.prinny.bot.start=x')).toBeNull();
+    expect(parseDeepLink('matrix:u/a:b.org?action=join&app.prinny.bot.start=x')).toBeNull();
+    expect(parseDeepLink('matrix:r/room:b.org?action=chat&app.prinny.bot.start=x')).toBeNull();
+    expect(parseDeepLink('matrix:u/a:b.org?action=chat&app.prinny.bot.start=has%20spaces')).toBeNull();
+    expect(() => buildDeepLinkMatrixUri('@a:b.org', 'has spaces')).toThrow(/payload/);
+  });
+
+  it('decodes a matrix: URI exactly once', () => {
+    const start = 'app.prinny.bot.start=x';
+    expect(parseDeepLink(`matrix:u/a%253Ab.org?action=chat&${start}`)).toBeNull();
+    expect(parseDeepLink(`matrix:u/a%3Ab.org?action=chat&${start}`)).toEqual({
+      userId: '@a:b.org',
+      payload: 'x',
+    });
   });
 
   it('builds the message the client sends', () => {

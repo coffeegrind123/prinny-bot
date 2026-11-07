@@ -450,12 +450,19 @@ reason other than a direct user action.
 
 ## 6. Deep links
 
-Telegram's `https://t.me/bot?start=payload`. Two equivalent forms:
+Telegram's `https://t.me/bot?start=payload`. Three equivalent forms:
 
 ```
 https://prinny.app/bot/{mxid}?start={payload}
 prinny://bot/{mxid}?start={payload}
+matrix:u/{mxid without @}?action=chat&app.prinny.bot.start={payload}
 ```
+
+The `matrix:` form is a standard MSC2312 chat link with our payload parameter
+added, so any client that speaks the scheme at least opens the DM; one that
+knows the parameter also sends `/start`. It is a deep link only with both
+`action=chat` and the payload parameter: a bare chat link can name a person,
+and a client MUST NOT answer it by sending them `/start`.
 
 The https form is the shareable one — it is what a user clicks inside a client
 or on the web, and it degrades to a normal web page for anyone without a client
