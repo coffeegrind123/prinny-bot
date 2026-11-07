@@ -81,7 +81,7 @@ quietly break it for everyone not running one specific client.
 
 | Telegram | Here |
 |---|---|
-| `setMyCommands` | `bot.setMyCommands([...])` — published per room as `app.prinny.bot.info` |
+| `setMyCommands` | `bot.setMyCommands([...])` — published per room as `app.prinny.bot.info`, and as MSC4391 command descriptions for gomuks and other clients that read those |
 | `setMyDescription`, `setMyName` | `bot.setMyProfile({...})` |
 | `setChatMenuButton` | `bot.setChatMenuButton({ type: 'commands' })` |
 | `InlineKeyboardMarkup` | `new InlineKeyboard().text().url().row()` |
@@ -98,6 +98,31 @@ quietly break it for everyone not running one specific client.
 Beyond Telegram: a `style` on inline buttons (`primary` / `danger`), an `args`
 usage hint on commands, and `/cmd@bot` addressing that a client can resolve for
 the user instead of making them type it.
+
+Commands can also declare typed `parameters` (MSC4391 schemas: strings,
+integers, booleans, user and room IDs, literals, unions and arrays). Clients
+that speak MSC4391 build a form from them and send the values as a structured
+invocation, which the bot prefers over the text when it is addressed to it:
+
+```ts
+await bot.setMyCommands([
+  {
+    command: 'ban',
+    description: 'Ban someone',
+    args: '<user> [reason]',
+    parameters: [
+      { key: 'user', schema: { schema_type: 'primitive', type: 'user_id' } },
+      { key: 'reason', schema: { schema_type: 'primitive', type: 'string' }, optional: true },
+    ],
+  },
+]);
+
+bot.command('ban', (ctx) => {
+  // From a structured invocation: { user: '@spam:example.org', reason: '...' }.
+  // From typed text: undefined, with the same values as text in ctx.command.args.
+  const args = ctx.command?.arguments;
+});
+```
 
 Not implemented, because they describe Telegram platform features with no Matrix
 meaning: `web_app`, `login_url`, `pay`, `callback_game`, inline mode.

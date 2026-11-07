@@ -30,7 +30,7 @@ import { Api } from './Api.js';
 import { Composer } from './Composer.js';
 import { Context, type CallbackQuery, type CommandMatch, type UpdateKind } from './Context.js';
 import { AccessControl, RateLimiter, type AccessOptions, type RateLimitOptions } from './access.js';
-import { CommandRegistry, isCommandForBot, parseCommand, type CommandDefinition } from './commands.js';
+import { CommandRegistry, commandOfMessage, type CommandDefinition } from './commands.js';
 import { flushCryptoStore, initCryptoStore } from './matrix/cryptoStore.js';
 import { BotContentKey, BotEventType, BotRelType } from './protocol/constants.js';
 import type { BotInfo, MenuButton, ReplyMarkup } from './protocol/types.js';
@@ -239,6 +239,15 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
       this.log(`could not set the bot flag on its member event in ${roomId}`);
     }
     const result = await this.api.publishBotInfo(roomId, this.botInfo());
+    if (result === 'state') {
+      const described = await this.api.publishCommandDescriptions(
+        roomId,
+        this.registry.getDescriptions()
+      );
+      if (!described.ok) {
+        this.log(`could not publish MSC4391 command descriptions to ${roomId}`);
+      }
+    }
     if (result === 'timeline') {
       this.log(
         `published commands to ${roomId} as a timeline event — no power to set state there, ` +
@@ -699,12 +708,15 @@ export class Bot<S = Record<string, unknown>> extends Composer<Context<S>> {
       callbackQuery = this.callbackQueryOf(event, room);
       if (!callbackQuery) return;
     } else if (kind === 'message') {
-      const text = plainBodyOf(event.getContent() as Record<string, unknown>);
-      const parsed = parseCommand(text);
-      if (parsed) {
-        // A command addressed to another bot in the room is not ours to answer.
-        if (!isCommandForBot(parsed, this.options.userId)) return;
-        command = parsed;
+      const found = commandOfMessage(
+        event.getContent() as Record<string, unknown>,
+        this.options.userId,
+        this.registry
+      );
+      // A command meant for another bot in the room is not ours to answer.
+      if (found === 'other') return;
+      if (found) {
+        command = found;
       } else if (this.options.matchFallbackReplies !== false) {
         callbackQuery = this.synthesiseFallbackCallback(event, room);
       }

@@ -114,6 +114,64 @@ A bot SHOULD re-send the timeline form on join and whenever its command list
 changes. Clients MUST NOT paginate history looking for one; a bot that never
 re-advertises simply has no published commands, and that is a correct outcome.
 
+### Alongside MSC4391
+
+[MSC4391](https://github.com/matrix-org/matrix-spec-proposals/pull/4391)
+(simplified in-room bot commands) describes each command in a state event of
+its own, and is what gomuks, mautrix-go and others read. A bot that can set
+state SHOULD publish both: `app.prinny.bot.info` exactly as above, and one
+`org.matrix.msc4391.command_description` per published command:
+
+```json5
+// state_key = base64(sha256("cwd" + "@openclaude:example.org")), padded
+{
+  "command": "cwd",
+  "description": { "m.text": [{ "body": "Change the working directory" }] },
+  "parameters": [
+    {
+      "key": "args",
+      "schema": { "schema_type": "primitive", "type": "string" },
+      "optional": true,
+      "description": { "m.text": [{ "body": "<path>" }] }
+    }
+  ],
+  "fi.mau.tail_parameter": "args"
+}
+```
+
+- A command with only an `args` hint becomes this single optional string
+  parameter, marked as the tail parameter (a mautrix-go extension) so a client
+  that parses typed text hands over the rest of the line, as `/cwd <path>` does.
+  A bot MAY declare typed `parameters` instead.
+- A command the bot stops publishing is withdrawn by setting its description
+  to `{}`. Descriptions already published unchanged are not rewritten.
+- MSC4391 has no timeline form, so a bot that fell back to the timeline publishes
+  only `app.prinny.bot.info`.
+
+A client reading both takes the schema from MSC4391 and the profile, menu button
+and command order from `app.prinny.bot.info`. Any sender of an MSC4391
+description counts as a bot (§7), and a description whose sender is no longer
+joined is hidden, like an `app.prinny.bot.info` from a departed bot.
+
+**Invocations.** A client that knows a command's MSC4391 description sends the
+command as text (`/cmd@bot args`, so every bot and client still understands it)
+and adds the structured block:
+
+```json5
+{
+  "msgtype": "m.text",
+  "body": "/cwd@openclaude ~/src",
+  "m.mentions": { "user_ids": ["@openclaude:example.org"] },
+  "org.matrix.msc4391.command": { "command": "cwd", "arguments": { "args": "~/src" } }
+}
+```
+
+A bot prefers the block over the text when `m.mentions.user_ids` names it, and
+ignores a block whose mentions name only other users (another bot's command).
+With no mentions it parses the text, as before. The library hands the
+structured values to handlers as `ctx.command.arguments`, and the same values
+as text in `ctx.command.args`.
+
 ---
 
 ## 2. Keyboards — `app.prinny.bot.reply_markup`
@@ -417,11 +475,15 @@ instruction.
 ## 7. Identifying a bot
 
 There is no Matrix-wide notion of a bot account. A client treats a user as a bot
-in a given room if either holds:
+in a given room if any of these holds:
 
 - an `app.prinny.bot.info` state event or cached timeline advertisement exists
   for that user in that room, or
-- their `m.room.member` content carries `"app.prinny.bot": true`.
+- their `m.room.member` content carries `"app.prinny.bot": true`, or
+- they sent an `org.matrix.msc4391.command_description` state event in that
+  room (§1, "Alongside MSC4391"), or
+- their `m.room.member` content carries MSC4015's `"bot": true` or its unstable
+  `"dev.nordgedanken.msc4015": true`.
 
 The library sets the member flag in every room it publishes to (option
 `markAsBot`, default on). Rewriting one's own member event needs no power, so

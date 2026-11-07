@@ -58,6 +58,12 @@ export type CommandMatch = {
    * that both offer `/status`, this is how each knows whether it was meant.
    */
   addressedTo?: string;
+  /**
+   * The structured arguments, when the client sent the command as an MSC4391
+   * invocation, keyed by parameter key. `args` then holds the same values as
+   * text, so handlers written against `args` work either way.
+   */
+  arguments?: Record<string, unknown>;
 };
 
 export type UpdateKind = 'message' | 'callback_query' | 'membership' | 'reaction' | 'other';

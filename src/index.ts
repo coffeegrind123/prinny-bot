@@ -36,6 +36,7 @@ export {
 
 export {
   CommandRegistry,
+  commandOfMessage,
   isCommandForBot,
   parseCommand,
   type CommandDefinition,

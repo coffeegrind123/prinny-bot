@@ -7,6 +7,17 @@
  */
 
 import { Limits, SCHEMA_VERSION } from './protocol/constants.js';
+import {
+  argumentsToText,
+  describeCommand,
+  invocationTarget,
+  isSingleWordCommand,
+  sanitizeCommandDescription,
+  type Msc4391CommandDescription,
+  type Msc4391Invocation,
+  type Msc4391Parameter,
+} from './protocol/msc4391.js';
+import { plainBodyOf } from './keyboard/fallback.js';
 import type { BotCommand, BotInfo, MenuButton } from './protocol/types.js';
 import { isValidCommandName, normalizeCommandName } from './protocol/validate.js';
 import type { CommandMatch } from './Context.js';
@@ -51,9 +62,60 @@ export const isCommandForBot = (match: CommandMatch, botUserId: string): boolean
   return target === full || target === full.replace(/^@/, '') || target === localpart;
 };
 
+/**
+ * A structured MSC4391 invocation as a command match, or `null` to fall back
+ * to the text. Our commands are single words, so a subcommand ("rooms add")
+ * cannot be one of ours and is left to the text parser.
+ */
+const commandOfInvocation = (
+  invocation: Msc4391Invocation,
+  botUserId: string,
+  registry: CommandRegistry
+): CommandMatch | null => {
+  if (!isSingleWordCommand(invocation.command)) return null;
+  const name = invocation.command.toLowerCase();
+  const definition = registry.get(name);
+  return {
+    name,
+    args: argumentsToText(invocation.arguments, definition && describeCommand(definition)),
+    addressedTo: botUserId,
+    arguments: invocation.arguments,
+  };
+};
+
+/**
+ * The command a message carries for this bot.
+ *
+ * An MSC4391 invocation that mentions the bot wins over the text, since a
+ * client's text form need not match our syntax at all. One that mentions only
+ * other users, or a `/cmd@other` text command, is someone else's: `'other'`.
+ * `null` means the message is not a command.
+ */
+export const commandOfMessage = (
+  content: Record<string, unknown>,
+  botUserId: string,
+  registry: CommandRegistry
+): CommandMatch | 'other' | null => {
+  const structured = invocationTarget(content, botUserId);
+  if (structured?.kind === 'other') return 'other';
+  if (structured?.kind === 'ours') {
+    const invoked = commandOfInvocation(structured.invocation, botUserId, registry);
+    if (invoked) return invoked;
+  }
+  const parsed = parseCommand(plainBodyOf(content));
+  if (!parsed) return null;
+  return isCommandForBot(parsed, botUserId) ? parsed : 'other';
+};
+
 export type CommandDefinition = BotCommand & {
   /** Keep it out of the published list. Telegram has no equivalent. */
   hidden?: boolean;
+  /**
+   * Typed parameters for clients that speak MSC4391 (gomuks and others), which
+   * build a form from them and send the values as structured arguments.
+   * Without them, `args` is published as one optional string parameter.
+   */
+  parameters?: Msc4391Parameter[];
 };
 
 /**
@@ -87,6 +149,12 @@ export class CommandRegistry {
         throw new RangeError(`Duplicate command "${name}".`);
       }
       seen.add(name);
+      if (command.parameters && !sanitizeCommandDescription(describeCommand(command))) {
+        throw new RangeError(
+          `The parameters of "${name}" are not a valid MSC4391 description: ` +
+            'each needs a unique key and a schema the proposal allows.'
+        );
+      }
       accepted.push({ ...command, command: name });
     }
 
@@ -101,7 +169,17 @@ export class CommandRegistry {
   getCommands(): BotCommand[] {
     return this.commands
       .filter((command) => !command.hidden)
-      .map(({ hidden: _hidden, ...command }) => command);
+      .map(({ hidden: _hidden, parameters: _parameters, ...command }) => command);
+  }
+
+  /** One MSC4391 description per published command, in published order. */
+  getDescriptions(): Msc4391CommandDescription[] {
+    return this.commands.filter((command) => !command.hidden).map(describeCommand);
+  }
+
+  /** A command by name, hidden ones included. */
+  get(name: string): CommandDefinition | undefined {
+    return this.commands.find((command) => command.command === name);
   }
 
   /** Every command, hidden ones included. */

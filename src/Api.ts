@@ -7,10 +7,17 @@
  * as "the bot doesn't work for half my users", so it is not left to the caller.
  */
 
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { EventTimeline, type MatrixClient } from 'matrix-js-sdk';
 import { BotContentKey, BotEventType, BotRelType } from './protocol/constants.js';
+import {
+  Msc4391,
+  digestToStateKey,
+  stateKeyInput,
+  type Msc4391CommandDescription,
+} from './protocol/msc4391.js';
 import type { BotInfo, MenuButton, ReplyMarkup } from './protocol/types.js';
 import type { BotCommand } from './protocol/types.js';
 import { buildFallbackBodies, renderFallbackListing } from './keyboard/fallback.js';
@@ -45,6 +52,32 @@ import { buildVoiceContent, type VoiceMetadata } from './matrix/voice.js';
  * Only 429 is retried. Anything else, `M_FORBIDDEN` above all, is a real
  * answer and retrying it just delays the fallback.
  */
+/** The MSC4391 `state_key` of `command` as published by `userId`. */
+export const commandStateKey = (command: string, userId: string): string =>
+  digestToStateKey(createHash('sha256').update(stateKeyInput(command, userId), 'utf8').digest());
+
+/**
+ * JSON with object keys sorted, so that content read back from the server
+ * compares equal to what was sent whatever order it came back in.
+ */
+const canonicalJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v
+  );
+
+export type CommandDescriptionsResult = {
+  /** Descriptions written because they were new or changed. */
+  sent: number;
+  /** Already published as they are. */
+  unchanged: number;
+  /** Withdrawn descriptions of commands the bot no longer publishes. */
+  blanked: number;
+  /** False when the homeserver refused, almost always for lack of power. */
+  ok: boolean;
+};
+
 const withRateLimitRetry = async <T>(send: () => Promise<T>, attempts = 3): Promise<T> => {
   for (let attempt = 1; ; attempt += 1) {
     try {
@@ -570,6 +603,72 @@ export class Api {
     } catch {
       return 'failed';
     }
+  }
+
+  /**
+   * Publish one MSC4391 command description per command into one room, and
+   * withdraw (blank to `{}`) the ones this bot published before that are no
+   * longer in the list.
+   *
+   * State only: the proposal has no timeline form, so a bot without power to
+   * set state is left with `app.prinny.bot.info`'s timeline fallback, which
+   * Prinny reads. Descriptions already published as they are get skipped, so
+   * a restart does not rewrite every command in every room. Stops at the
+   * first refusal, since the next one would be refused for the same reason.
+   */
+  async publishCommandDescriptions(
+    roomId: string,
+    descriptions: Msc4391CommandDescription[]
+  ): Promise<CommandDescriptionsResult> {
+    const result: CommandDescriptionsResult = { sent: 0, unchanged: 0, blanked: 0, ok: true };
+    const userId = this.client.getUserId();
+    if (!userId) return { ...result, ok: false };
+
+    const state = this.client
+      .getRoom(roomId)
+      ?.getLiveTimeline()
+      .getState(EventTimeline.FORWARDS);
+    const existing = new Map<string, string>();
+    for (const event of state?.getStateEvents(Msc4391.CommandDescription) ?? []) {
+      const key = event.getStateKey();
+      if (key === undefined || event.getSender() !== userId) continue;
+      existing.set(key, canonicalJson(event.getContent()));
+    }
+
+    const put = async (key: string, content: object): Promise<boolean> => {
+      try {
+        await withRateLimitRetry(() =>
+          this.client.sendStateEvent(
+            roomId,
+            Msc4391.CommandDescription as never,
+            content as never,
+            key
+          )
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const wanted = new Set<string>();
+    for (const description of descriptions) {
+      const key = commandStateKey(description.command, userId);
+      wanted.add(key);
+      if (existing.get(key) === canonicalJson(description)) {
+        result.unchanged += 1;
+        continue;
+      }
+      if (!(await put(key, description))) return { ...result, ok: false };
+      result.sent += 1;
+    }
+
+    for (const [key, content] of existing) {
+      if (wanted.has(key) || content === '{}') continue;
+      if (!(await put(key, {}))) return { ...result, ok: false };
+      result.blanked += 1;
+    }
+    return result;
   }
 
   /**
