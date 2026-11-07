@@ -64,5 +64,6 @@ export {
 } from './events.js';
 
 export { WebhookServer, WEBHOOK_IDENTITY_KEY, type WebhookServerOptions } from './server.js';
+export { PER_MESSAGE_PROFILE_KEY_UNSTABLE } from './profile.js';
 
 export * from './types.js';

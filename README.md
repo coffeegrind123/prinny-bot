@@ -271,7 +271,7 @@ prefixes are optional, as on Discord.
 | components (buttons) | `app.prinny.bot.reply_markup` inline keyboard |
 | select menu | one button per option, same callback |
 | poll | MSC3381 `m.poll.start` |
-| `username` / `avatar_url` | `in.prinny.webhook`, rendered by the Prinny client |
+| `username` / `avatar_url` | MSC4144 per-message profile (`com.beeper.per_message_profile`), plus the legacy `in.prinny.webhook` for older Prinny clients |
 | `thread_id` / `thread_name` | `m.thread` relation |
 | `@everyone` | `@room`, only when `allowed_mentions` permits it |
 
@@ -293,6 +293,15 @@ rather than a gap:
   remote URL; rendering it would leak every reader's IP address to whoever holds
   the webhook token. The same rule applies to `avatar_url`, where only `mxc://`
   is honoured.
+- **The text starts with the sender's name.** Matrix messages come from the
+  bot account, so `username`/`avatar_url` ride as an MSC4144 per-message
+  profile, which Prinny, Sable, gomuks and mautrix-aware clients show as the
+  author. For every other client the text is prefixed `Name: ` (and
+  `<strong data-mx-profile-fallback>` in HTML) so they still show who spoke;
+  profile-aware clients strip it. A file without a caption is not prefixed.
+  The name is whitespace-collapsed and cut to 80 characters / 255 bytes.
+  `profileFallback: false` turns the prefix off. Message objects returned by
+  the API carry the text without it.
 - **Management endpoints need a bot token from `authTokens`.** There is no
   Discord permission model here, so holding one of those tokens *is*
   MANAGE_WEBHOOKS. With none configured, every management route is closed — an

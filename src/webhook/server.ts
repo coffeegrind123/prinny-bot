@@ -22,7 +22,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { timingSafeEqual } from 'node:crypto';
 import type { MatrixClient } from 'matrix-js-sdk';
 import { buildMediaContent, uploadAttachment } from '../matrix/media.js';
-import { BotContentKey, Limits } from '../protocol/constants.js';
+import { BotContentKey } from '../protocol/constants.js';
 import { cleanString } from '../protocol/validate.js';
 import { buildFallbackBodies } from '../keyboard/fallback.js';
 import { generateWebhookToken, SnowflakeGenerator } from './snowflake.js';
@@ -37,6 +37,14 @@ import {
 import { parseBoundary, parseMultipart } from './multipart.js';
 import { slackToExecuteBody, type SlackWebhookBody } from './slack.js';
 import { githubToExecuteBody } from './github.js';
+import {
+  PER_MESSAGE_PROFILE_KEY_UNSTABLE,
+  applyProfileFallback,
+  buildPerMessageProfile,
+  normalizeDisplayName,
+  stripProfileFallbackBody,
+  type WebhookProfile,
+} from './profile.js';
 
 /**
  * Discord's documented Execute Webhook attachment limit. Enforced so one
@@ -108,7 +116,22 @@ export type WebhookServerOptions = {
   maxBodyBytes?: number;
   render?: RenderContext;
   snowflakes?: SnowflakeGenerator;
+  /**
+   * Put `Name: ` in front of each message's text (MSC4144's fallback), so
+   * clients that do not understand per-message profiles still show which
+   * webhook identity spoke. Readers that do understand them strip it. Default
+   * true.
+   */
+  profileFallback?: boolean;
 };
+
+/** How an event's text may carry the MSC4144 name fallback. */
+enum FallbackText {
+  /** Prefix `body` / `formatted_body` with the name. */
+  Prefix,
+  /** No user text to prefix (a poll, or a file with no caption). */
+  None,
+}
 
 type RouteParams = Record<string, string>;
 
@@ -254,6 +277,8 @@ export class WebhookServer {
 
   private readonly snowflakes: SnowflakeGenerator;
 
+  private readonly profileFallback: boolean;
+
   private readonly routes: Route[] = [];
 
   private server?: Server;
@@ -267,6 +292,7 @@ export class WebhookServer {
     this.maxBodyBytes = options.maxBodyBytes ?? 25 * 1024 * 1024;
     this.renderCtx = options.render ?? {};
     this.snowflakes = options.snowflakes ?? new SnowflakeGenerator();
+    this.profileFallback = options.profileFallback ?? true;
     this.registerRoutes();
   }
 
@@ -902,9 +928,12 @@ export class WebhookServer {
     // everything else lands underneath it.
     // Every event this request produces is from the same sender identity, not
     // just the text: the thread root, the poll and each attachment too.
-    const identity = this.webhookIdentity(entry, merged);
-    const withIdentity = <T extends Record<string, unknown>>(content: T): T => {
-      if (identity) (content as Record<string, unknown>)[WEBHOOK_IDENTITY_KEY] = identity;
+    const profile = this.webhookProfile(entry, merged);
+    const withIdentity = <T extends Record<string, unknown>>(
+      content: T,
+      text: FallbackText = FallbackText.Prefix
+    ): T => {
+      this.attachProfile(content, profile, text);
       return content;
     };
 
@@ -927,7 +956,7 @@ export class WebhookServer {
     }
 
     if (merged.poll) {
-      const pollContent = withIdentity(renderPoll(merged.poll));
+      const pollContent = withIdentity(renderPoll(merged.poll), FallbackText.None);
       if (rootEventId) pollContent['m.relates_to'] = threadRelation(rootEventId);
       const sent = await this.client.sendEvent(
         roomId,
@@ -946,10 +975,15 @@ export class WebhookServer {
         filename: described?.filename ?? file.filename,
         mimeType: file.contentType,
       });
-      const mediaContent = withIdentity(
-        buildMediaContent(msgtypeFor(uploaded.mimeType), described?.filename ?? file.filename, uploaded)
+      const mediaContent: Record<string, unknown> = buildMediaContent(
+        msgtypeFor(uploaded.mimeType),
+        described?.filename ?? file.filename,
+        uploaded
       );
       if (described?.description) mediaContent.body = described.description;
+      // Only a caption is the sender's text; a bare `body` is the file name,
+      // and "Deploy: build.log" would read as if the name were part of it.
+      withIdentity(mediaContent, described?.description ? FallbackText.Prefix : FallbackText.None);
       if (rootEventId) mediaContent['m.relates_to'] = threadRelation(rootEventId);
       const sent = await this.client.sendMessage(roomId, mediaContent as never);
       primaryEventId = primaryEventId ?? sent.event_id;
@@ -1049,10 +1083,37 @@ export class WebhookServer {
     };
     if (components.markup) content[BotContentKey.ReplyMarkup] = components.markup;
 
-    const identity = this.webhookIdentity(entry, payload);
-    if (identity) content[WEBHOOK_IDENTITY_KEY] = identity;
+    // After buildFallbackBodies, so the name goes in front of the keyboard
+    // listing too rather than in the middle of the text.
+    this.attachProfile(content, this.webhookProfile(entry, payload), FallbackText.Prefix);
 
     return content;
+  }
+
+  /**
+   * Puts the webhook's identity on one event: MSC4144's per-message profile
+   * (with the `Name: ` fallback when the event has text and the option is on)
+   * and, for one release of overlap, the legacy `in.prinny.webhook` object
+   * older Prinny clients read.
+   */
+  private attachProfile(
+    content: Record<string, unknown>,
+    profile: WebhookProfile | undefined,
+    text: FallbackText
+  ): void {
+    if (!profile) return;
+
+    const legacy: Record<string, unknown> = { id: profile.webhookId };
+    if (profile.displayname) legacy.username = profile.displayname;
+    if (profile.avatarUrl) legacy.avatar_url = profile.avatarUrl;
+    content[WEBHOOK_IDENTITY_KEY] = legacy;
+
+    const hasFallback =
+      this.profileFallback &&
+      text === FallbackText.Prefix &&
+      profile.displayname !== undefined &&
+      applyProfileFallback(content, profile.displayname);
+    content[PER_MESSAGE_PROFILE_KEY_UNSTABLE] = buildPerMessageProfile(profile, hasFallback);
   }
 
   /**
@@ -1062,32 +1123,34 @@ export class WebhookServer {
    * stop, and only an application service can speak as a ghost user. Rather
    * than silently dropping the fields (so every CI job posts as "prinny-bot")
    * or renaming the bot account per message (a race, and visible to everyone in
-   * the room), they ride in a content key the Prinny client renders as the
+   * the room), they ride as an MSC4144 per-message profile (see profile.ts),
+   * which Prinny, mautrix-aware clients, Sable and gomuks render as the
    * message's author - which is exactly what Discord shows for a webhook.
    *
-   * Clients that do not know the key show the bot's own name, which is true.
+   * Clients that do not know it show the bot's own name, which is true, with
+   * the `Name: ` fallback in front of the text saying who spoke.
    */
-  private webhookIdentity(
+  private webhookProfile(
     entry: StoredWebhook,
     payload: ExecuteWebhookBody
-  ): Record<string, unknown> | undefined {
+  ): WebhookProfile | undefined {
     // README: "The same rule applies to `avatar_url`, where only `mxc://` is
     // honoured", because rendering an arbitrary remote URL would leak every
     // reader's IP address to whoever holds the webhook token. That rule is
     // enforced here; the embed-image path already implements its half.
     const rawUsername = payload.username ?? entry.webhook.name ?? undefined;
-    const username = rawUsername
-      ? cleanString(rawUsername, Limits.BUTTON_TEXT_MAX_LENGTH)
-      : undefined;
+    const displayname = normalizeDisplayName(
+      rawUsername ? cleanString(rawUsername, rawUsername.length) : undefined
+    );
     const avatarUrl =
       typeof payload.avatar_url === 'string' && payload.avatar_url.startsWith('mxc://')
         ? payload.avatar_url
         : undefined;
-    if (!username && !avatarUrl) return undefined;
-    const identity: Record<string, unknown> = { id: entry.webhook.id };
-    if (username) identity.username = username;
-    if (avatarUrl) identity.avatar_url = avatarUrl;
-    return identity;
+    if (!displayname && !avatarUrl) return undefined;
+    const profile: WebhookProfile = { webhookId: entry.webhook.id };
+    if (displayname) profile.displayname = displayname;
+    if (avatarUrl) profile.avatarUrl = avatarUrl;
+    return profile;
   }
 
   /** Discord's message object for a message this server sent. */
@@ -1099,6 +1162,15 @@ export class WebhookServer {
     const event = await this.fetchEvent(stored);
     const content = (event?.content ?? {}) as Record<string, unknown>;
     const username = (payload?.username ?? entry.webhook.name) ?? 'webhook';
+    // The event's text carries the MSC4144 `Name: ` fallback; a Discord client
+    // asking for its message back expects the text it sent.
+    const profile = content[PER_MESSAGE_PROFILE_KEY_UNSTABLE] as
+      | { displayname?: unknown; has_fallback?: unknown }
+      | undefined;
+    const fallbackName =
+      profile?.has_fallback === true && typeof profile.displayname === 'string'
+        ? profile.displayname
+        : undefined;
 
     return {
       id: stored.id,
@@ -1111,7 +1183,10 @@ export class WebhookServer {
         avatar: null,
         bot: true,
       },
-      content: typeof content.body === 'string' ? content.body : (payload?.content ?? ''),
+      content:
+        typeof content.body === 'string'
+          ? stripProfileFallbackBody(content.body, fallbackName)
+          : (payload?.content ?? ''),
       timestamp: new Date(stored.createdAt).toISOString(),
       edited_timestamp: null,
       tts: false,

@@ -327,6 +327,149 @@ describe('webhook server', () => {
     });
   });
 
+  describe('MSC4144 per-message profile', () => {
+    const PROFILE = 'com.beeper.per_message_profile';
+
+    const post = async (id: string, token: string, body: unknown, query = '') =>
+      fetch(`${base}/api/webhooks/${id}/${token}${query}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    it('writes the profile with the name fallback, and keeps the legacy key', async () => {
+      const { id, token } = await createWebhook();
+      await post(id, token, {
+        content: '**hi**',
+        username: 'Deploy',
+        avatar_url: 'mxc://example.org/abc',
+      });
+      const content = sent[0]?.content ?? {};
+      const profile = content[PROFILE] as Record<string, unknown>;
+      expect(profile.id).toMatch(new RegExp(`^${id}:[0-9a-f]{16}$`));
+      expect(profile).toMatchObject({
+        displayname: 'Deploy',
+        avatar_url: 'mxc://example.org/abc',
+        has_fallback: true,
+        'in.prinny.webhook': { id },
+      });
+      expect(content.body).toBe('Deploy: hi');
+      // Inside the leading <p>, so the name stays on the first line.
+      expect(content.formatted_body).toBe(
+        '<p><strong data-mx-profile-fallback>Deploy: </strong><strong>hi</strong></p>'
+      );
+      expect(content['in.prinny.webhook']).toEqual({
+        id,
+        username: 'Deploy',
+        avatar_url: 'mxc://example.org/abc',
+      });
+    });
+
+    it('gives each identity of a webhook its own id, and the same id each time', async () => {
+      const { id, token } = await createWebhook();
+      await post(id, token, { content: 'a', username: 'CI' });
+      await post(id, token, { content: 'b', username: 'Deploy' });
+      await post(id, token, { content: 'c', username: 'CI' });
+      const ids = sent.map(({ content }) => (content[PROFILE] as { id: string }).id);
+      expect(ids[0]).not.toBe(ids[1]);
+      expect(ids[0]).toBe(ids[2]);
+    });
+
+    it('normalises the name the way readers do before prefixing it', async () => {
+      const { id, token } = await createWebhook();
+      await post(id, token, { content: 'x', username: `  Build\n\t ${'y'.repeat(100)}` });
+      const content = sent[0]?.content ?? {};
+      const name = (content[PROFILE] as { displayname: string }).displayname;
+      expect(name.startsWith('Build y')).toBe(true);
+      expect(Array.from(name)).toHaveLength(80);
+      expect(String(content.body).startsWith(`${name}: `)).toBe(true);
+    });
+
+    it('escapes the name in the HTML fallback exactly as the Prinny client expects', async () => {
+      const { id, token } = await createWebhook();
+      await post(id, token, { content: 'x', username: `<O'Brien & "co">` });
+      expect(String(sent[0]?.content.formatted_body)).toContain(
+        '<strong data-mx-profile-fallback>&lt;O&#39;Brien &amp; &quot;co&quot;&gt;: </strong>'
+      );
+    });
+
+    it('prefixes captions but not bare file names, and never polls', async () => {
+      const { id, token } = await createWebhook();
+      const form = new FormData();
+      form.append(
+        'payload_json',
+        JSON.stringify({
+          username: 'Deploy',
+          attachments: [{ id: 1, description: 'the build log' }],
+          poll: { question: { text: 'Ship?' }, answers: [{ poll_media: { text: 'yes' } }] },
+        })
+      );
+      form.append('files[0]', new Blob([new Uint8Array([1])], { type: 'image/png' }), 'a.png');
+      form.append('files[1]', new Blob([new Uint8Array([1])], { type: 'image/png' }), 'b.png');
+      const response = await fetch(`${base}/api/webhooks/${id}/${token}`, { method: 'POST', body: form });
+      expect(response.status).toBe(204);
+      // poll, a.png (no caption), b.png (caption)
+      expect(sent).toHaveLength(3);
+      const [poll, bare, captioned] = sent.map(({ content }) => content);
+      expect((poll?.[PROFILE] as { has_fallback: boolean }).has_fallback).toBe(false);
+      expect(bare?.body).toBe('a.png');
+      expect((bare?.[PROFILE] as { has_fallback: boolean }).has_fallback).toBe(false);
+      expect(captioned?.body).toBe('Deploy: the build log');
+      expect((captioned?.[PROFILE] as { has_fallback: boolean }).has_fallback).toBe(true);
+    });
+
+    it('puts the profile and fallback in an edit\'s new content', async () => {
+      const { id, token } = await createWebhook();
+      const created = await post(id, token, { content: 'before', username: 'Deploy' }, '?wait=true');
+      const message = (await created.json()) as { id: string };
+      await fetch(`${base}/api/webhooks/${id}/${token}/messages/${message.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: 'after' }),
+      });
+      const replacement = sent[sent.length - 1]?.content ?? {};
+      const newContent = replacement['m.new_content'] as Record<string, unknown>;
+      expect(newContent.body).toBe('Deploy: after');
+      expect((newContent[PROFILE] as { has_fallback: boolean }).has_fallback).toBe(true);
+      expect(replacement.body).toBe('* Deploy: after');
+    });
+
+    it('hands the text back without the fallback over the Discord API', async () => {
+      const { id, token } = await createWebhook();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (server as any).client.fetchRoomEvent = async () => ({ content: sent[0]?.content });
+      const response = await post(id, token, { content: 'hello', username: 'Deploy' }, '?wait=true');
+      const message = (await response.json()) as { content: string };
+      expect(message.content).toBe('hello');
+    });
+
+    it('leaves the text alone when profileFallback is off', async () => {
+      const quietSent: SentEvent[] = [];
+      const quiet = new WebhookServer({
+        client: fakeClient(quietSent),
+        store,
+        authTokens: ['secret-bot-token'],
+        profileFallback: false,
+      });
+      await quiet.listen(0);
+      try {
+        const { id, token } = await createWebhook();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const port = ((quiet as any).server.address() as AddressInfo).port;
+        await fetch(`http://127.0.0.1:${port}/api/webhooks/${id}/${token}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ content: 'hi', username: 'Deploy' }),
+        });
+        const content = quietSent[0]?.content ?? {};
+        expect(content.body).toBe('hi');
+        expect((content[PROFILE] as { has_fallback: boolean }).has_fallback).toBe(false);
+      } finally {
+        await quiet.close();
+      }
+    });
+  });
+
   it('deletes a message it sent', async () => {
     const { id, token } = await createWebhook();
     const created = await fetch(`${base}/api/webhooks/${id}/${token}?wait=true`, {
